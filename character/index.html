@@ -10,6 +10,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { buildHair } from './hair.js';
 
 const Q = new URLSearchParams(location.search);
 const canvas = document.getElementById('gl');
@@ -24,7 +25,8 @@ const sun = new THREE.DirectionalLight(0xffffff, 2); sun.position.set(1, 2, 3); 
 
 const load = url => new Promise((ok, bad) => new GLTFLoader().load(url, ok, undefined, bad));
 // head=bald (default): clean bald scan + separate wig.  head=head: scan with fused hair (kept for comparison).
-const HEAD_SRC = Q.get('head') || 'bald', useWig = HEAD_SRC === 'bald';
+// hair=code (default): procedural hair grown on the bald scan.  hair=wig: the wig model.
+const HEAD_SRC = Q.get('head') || 'bald', HAIR = Q.get('hair') || 'code', useWig = HEAD_SRC === 'bald' && HAIR === 'wig';
 const [bodyG, headG, wigG] = await Promise.all([load('../assets/body.glb'), load(`../assets/${HEAD_SRC}.glb`), useWig ? load('../assets/wig.glb') : null]);
 
 // ---- body: drop the low-detail head and hair, keep everything below the neck
@@ -134,6 +136,18 @@ if (Q.get('neck') !== 'keep') {
   });
 }
 
+// ---- hair: grown in code on the scalp of the bald scan
+let hair = null;
+if (HEAD_SRC === 'bald' && HAIR === 'code') {
+  const f = new THREE.Vector3(...SCAN.forward).normalize(), eR = new THREE.Vector3(...SCAN.eyeR), eL = new THREE.Vector3(...SCAN.eyeL);
+  const mid = eR.clone().add(eL).multiplyScalar(0.5), left = eL.clone().sub(eR); left.addScaledVector(f, -left.dot(f)).normalize();
+  const up = new THREE.Vector3().crossVectors(f, left);
+  let headMesh; head.traverse(o => { if (o.isMesh) headMesh = o; });
+  hair = buildHair(THREE, headMesh, { mid, left, up, f, gap: eR.distanceTo(eL) }, window.__hairOpts || {});
+  pivot.add(hair.group);
+  console.log('INFO hair triangles', hair.triangles);
+}
+
 // ---- hair: a separate wig shell, placed in bind-pose world units and carried by the head bone
 const wig = new THREE.Group(), WIG = { s: 0.226, sx: 0.95, sz: 1, x: 0.002, y: 0.814, z: 0, pitch: 0 };
 function setWig(o) {
@@ -156,7 +170,8 @@ function view(az = 0, el = 0.05, dist = size.y * 2.4, t = [ctr.x, ctr.y, ctr.z])
   controls.update(); scene.updateMatrixWorld(true); renderer.render(scene, camera);
 }
 view();
-renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => { if (hair) hair.uniforms.uTime.value = clock.getElapsedTime(); controls.update(); renderer.render(scene, camera); });
 const wp = b => b.getWorldPosition(new THREE.Vector3()).toArray().map(v => +v.toFixed(3));
 console.log('INFO', JSON.stringify({ box: [box.min.toArray(), box.max.toArray()].map(a => a.map(v => +v.toFixed(3))), head: wp(headBone), neck: wp(bone('Neck')), hips: wp(bone('Hips')) }));
 Object.assign(window, { __view: view, __setHead: setHead, __setWig: setWig, wig, __ready: true, THREE, scene, camera, pivot, body, headBone });
