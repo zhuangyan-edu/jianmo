@@ -70,7 +70,14 @@
 
 ## 5. 实施路径
 
-目前只完成了素材检查，下面的步骤都还没开始。
+**进度**：第 1、2 步已完成，第 3 步做了一半（角色已拼好，最终的光照和 shader 还没上）。
+
+- 减面后的模型在 `assets/`：`body.glb`、`bald.glb`、`wig.glb`、`head.glb`、`katana.glb`、`ruin.glb`，合计约 17 MB。用 `@gltf-transform/cli` 的 weld、simplify、resize、webp 处理。
+- 角色页面是 `character/index.html`：运行时切掉绑骨身体上权重属于 `Head` 骨骼的三角面，再把新头挂到 `Head` 骨骼上。
+- **换头最终用的是 `bald` + `wig`，不是 `head`**。`head` 的发丝粘在脸上，贴图里还烘进了深色污痕，清不干净；光头的脸是干净的，假发又是独立网格。`?head=head` 可以切回去对比。
+- 头的朝向是算出来的：按贴图颜色找到两只眼睛的顶点，取眼睛连线和眼周皮肤的平均法线，得到头的坐标系（`tools/analyse-head.js`），结果写在页面的 `SCANS` 里。
+- 预览：`docs/previews/character-face.jpg`、`docs/previews/character-body.jpg`。
+- 还没处理：脖子上残留的旧模型皮肤有深色污痕；眼睛瞳孔太淡；头相对身体略大；假发还不会动。
 
 1. **减面和压缩**。把高面数模型减到网页能加载的规模，贴图压到 2K，输出到开发分支（例如 `assets/`）。
    目标：头 3–5 万面，刀 1 万，废墟 10 万左右。原始文件留在 `upload-3d-models` 分支不动。

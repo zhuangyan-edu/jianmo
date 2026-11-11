@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>角色转台</title>
+<style>html,body{margin:0;height:100%;background:#1b1e26;overflow:hidden}canvas{display:block;width:100%;height:100%}</style>
+<canvas id="gl"></canvas>
+<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.min.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}</script>
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+const Q = new URLSearchParams(location.search);
+const canvas = document.getElementById('gl');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0x8a8f98);
+const camera = new THREE.PerspectiveCamera(30, 1, 0.01, 100);
+const controls = new OrbitControls(camera, canvas);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x555555, 2.2));
+const sun = new THREE.DirectionalLight(0xffffff, 2); sun.position.set(1, 2, 3); scene.add(sun);
+
+const load = url => new Promise((ok, bad) => new GLTFLoader().load(url, ok, undefined, bad));
+// head=bald (default): clean bald scan + separate wig.  head=head: scan with fused hair (kept for comparison).
+const HEAD_SRC = Q.get('head') || 'bald', useWig = HEAD_SRC === 'bald';
+const [bodyG, headG, wigG] = await Promise.all([load('../assets/body.glb'), load(`../assets/${HEAD_SRC}.glb`), useWig ? load('../assets/wig.glb') : null]);
+
+// ---- body: drop the low-detail head and hair, keep everything below the neck
+const body = bodyG.scene; scene.add(body); body.updateMatrixWorld(true);
+let skinned; body.traverse(o => { if (o.isSkinnedMesh) skinned = o; });
+skinned.frustumCulled = false;
+const bones = skinned.skeleton.bones, bone = n => bones.find(b => b.name.endsWith(n));
+const headBone = bone('Head'), headIdx = bones.indexOf(headBone);
+{
+  const g = skinned.geometry, si = g.attributes.skinIndex, sw = g.attributes.skinWeight, idx = g.index.array;
+  const hw = new Float32Array(si.count);
+  for (let i = 0; i < si.count; i++) for (let k = 0; k < 4; k++) if (si.getComponent(i, k) === headIdx) hw[i] += sw.getComponent(i, k);
+  const thr = +(Q.get('cut') ?? 0.5), keep = [];
+  for (let i = 0; i < idx.length; i += 3) if (Math.max(hw[idx[i]], hw[idx[i + 1]], hw[idx[i + 2]]) <= thr) keep.push(idx[i], idx[i + 1], idx[i + 2]);
+  if (Q.get('mode') !== 'body') g.setIndex(keep);
+}
+
+// ---- head: align the scanned head to the head bone
+const head = headG.scene, pivot = new THREE.Group();
+pivot.add(head);
+// The scan is exported tilted. These were measured on assets/head.glb (tools/analyse-head.js):
+// the two eye centres and the average skin normal around them, in the scan's own coordinates.
+const SCANS = {
+  head: { eyeR: [0.1099, 0.3185, 0.3179], eyeL: [0.2628, 0.3006, 0.2335], forward: [0.1755, -0.1532, 0.5167] },
+  bald: { eyeR: [0.0072, 0.4808, 0.2885], eyeL: [0.2193, 0.4418, 0.1792], forward: [0.3450, -0.1381, 0.6923] },
+};
+const SCAN = SCANS[HEAD_SRC];
+// Where the eyes should sit on the rigged body (bind pose, world units) and how far apart.
+const HEAD = { eyeY: 0.905, eyeZ: 0.062, eyeGap: 0.05, pitch: 0, yaw: 0, roll: 0 };
+const bindHeadInv = headBone.matrixWorld.clone().invert();
+function setHead(o) {
+  Object.assign(HEAD, o);
+  const f = new THREE.Vector3(...SCAN.forward).normalize();
+  const eR = new THREE.Vector3(...SCAN.eyeR), eL = new THREE.Vector3(...SCAN.eyeL), mid = eR.clone().add(eL).multiplyScalar(0.5);
+  const left = eL.clone().sub(eR); left.addScaledVector(f, -left.dot(f)).normalize();
+  const up = new THREE.Vector3().crossVectors(f, left);
+  const s = HEAD.eyeGap / eR.distanceTo(eL);
+  const straighten = new THREE.Matrix4().makeBasis(left, up, f).transpose();           // scan space -> upright head space
+  const fix = new THREE.Matrix4().makeRotationFromEuler(new THREE.Euler(HEAD.pitch, HEAD.yaw, HEAD.roll, 'YXZ'));
+  const world = new THREE.Matrix4().makeTranslation(headBone.matrixWorld.elements[12], HEAD.eyeY, HEAD.eyeZ)
+    .multiply(fix).multiply(new THREE.Matrix4().makeScale(s, s, s)).multiply(straighten)
+    .multiply(new THREE.Matrix4().makeTranslation(-mid.x, -mid.y, -mid.z));
+  pivot.matrixAutoUpdate = false;
+  pivot.matrix.copy(Q.get('mode') === 'head' ? world : bindHeadInv.clone().multiply(world));
+  pivot.matrixWorldNeedsUpdate = true;
+}
+setHead({});
+
+// ---- hair: a separate wig shell, placed in bind-pose world units and carried by the head bone
+const wig = new THREE.Group(), WIG = { s: 0.245, x: 0.002, y: 0.822, z: -0.005, pitch: 0 };
+function setWig(o) {
+  Object.assign(WIG, o);
+  const world = new THREE.Matrix4().makeTranslation(WIG.x, WIG.y, WIG.z).multiply(new THREE.Matrix4().makeRotationX(WIG.pitch)).multiply(new THREE.Matrix4().makeScale(WIG.s, WIG.s, WIG.s));
+  wig.matrixAutoUpdate = false; wig.matrix.copy(bindHeadInv.clone().multiply(world)); wig.matrixWorldNeedsUpdate = true;
+}
+if (wigG) {
+  wigG.scene.traverse(o => { if (o.isMesh) o.material = new THREE.MeshStandardMaterial({ color: 0x17151a, roughness: 0.55, side: THREE.DoubleSide }); });
+  wig.add(wigG.scene); setWig({}); headBone.add(wig);
+}
+if (Q.get('mode') === 'head') { scene.remove(body); scene.add(pivot); } else if (Q.get('mode') !== 'body') headBone.add(pivot);
+
+function resize() { const w = canvas.clientWidth, h = canvas.clientHeight; renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix(); }
+addEventListener('resize', resize); resize();
+const box = new THREE.Box3().setFromObject(Q.get('mode') === 'head' ? pivot : body), ctr = box.getCenter(new THREE.Vector3()), size = box.getSize(new THREE.Vector3());
+function view(az = 0, el = 0.05, dist = size.y * 2.4, t = [ctr.x, ctr.y, ctr.z]) {
+  controls.target.set(...t);
+  camera.position.set(t[0] + dist * Math.sin(az) * Math.cos(el), t[1] + dist * Math.sin(el), t[2] + dist * Math.cos(az) * Math.cos(el));
+  controls.update(); scene.updateMatrixWorld(true); renderer.render(scene, camera);
+}
+view();
+renderer.setAnimationLoop(() => { controls.update(); renderer.render(scene, camera); });
+const wp = b => b.getWorldPosition(new THREE.Vector3()).toArray().map(v => +v.toFixed(3));
+console.log('INFO', JSON.stringify({ box: [box.min.toArray(), box.max.toArray()].map(a => a.map(v => +v.toFixed(3))), head: wp(headBone), neck: wp(bone('Neck')), hips: wp(bone('Hips')) }));
+Object.assign(window, { __view: view, __setHead: setHead, __setWig: setWig, wig, __ready: true, THREE, scene, camera, pivot, body, headBone });
+</script>
+</html>
