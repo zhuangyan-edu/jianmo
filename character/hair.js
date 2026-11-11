@@ -23,7 +23,10 @@ export const HAIR_DEFAULTS = {
   crown: [0.12, 2.1, -1.45],
   wind: [-0.85, 0.12, -0.5],    // blows toward the character's right and back
   windStrength: 0.07,
-  gravity: 0.17,
+  gravity: 0.14,
+  part: 0.3,           // x of the fringe parting: locks sweep away from it to either side
+  volume: 1.1,         // how far the outer layer stands off the skull (1 = on the skull)
+  bell: 0.1,           // how slowly the silhouette narrows below the skull; smaller = fuller bob
   color: [0.024, 0.019, 0.023],      // linear RGB
 };
 
@@ -68,32 +71,45 @@ export function buildHair(THREE, headMesh, frame, options = {}) {
     const n = outward(root), az = Math.atan2(root.x, root.z - C.z);            // 0 = front, ±π = back
     const front = Math.max(0, 1 - Math.abs(az) / 1.0), back = Math.max(0, (Math.abs(az) - 1.9) / 1.2);
     // where the strand stops: fringe at eye level (a few reach the nose), sides at the jaw, back at the nape
-    let endY = front > 0 ? 0.6 - R() * 0.5 - (R() < 0.18 ? 0.6 : 0) : root.y - 1.75 - R() * 0.6 - back * 0.2;     // tiers: higher roots end higher
+    let endY = front > 0 ? 0.6 - R() * 0.4 - (R() < 0.15 ? 0.7 : 0) : Math.max(root.y - 1.45 - R() * 0.5, -1.2 - R() * 0.3 - back * 0.15);     // tiers: higher roots end higher
     if (k.wisp) endY += 0.35;
     const flow = new THREE.Vector3().subVectors(root, CROWN); flow.addScaledVector(n, -flow.dot(n)).normalize();
     // swirl the flow a little so the parting is not a perfect star
     flow.applyAxisAngle(n, (R() - 0.5) * 0.9 + 0.25);
+    // fringe: sweep diagonally away from the parting instead of falling straight down
+    if (front > 0.15) { flow.x += Math.sign(root.x - o.part + (R() - 0.5) * 0.3) * (0.3 + R() * 0.4) * front; flow.addScaledVector(n, -flow.dot(n)).normalize(); }
     const d = flow.clone().addScaledVector(n, 0.04 + k.lift * 1.5).normalize();
     const step = 0.13, pts = [root.clone()], p = root.clone();
     const l0 = new THREE.Vector3().subVectors(root, C).divide(RAD).length();                // the real scalp is not exactly the ellipsoid
-    const l1 = 1.05 + k.lift * 2.5 + 0.06 * Math.min(1, Math.max(0, (root.y - 0.4) / 1.7));       // higher roots lie on top
-    const flick = (R() < 0.75 ? 1 : 0.2) * (0.1 + R() * 0.14) * (front > 0 ? 0.3 : 1);                                 // some tips kick outward
+    const l1 = o.volume - 0.05 + k.lift * 2.5 + 0.07 * Math.min(1, Math.max(0, (root.y - 0.4) / 1.7)) + front * 0.05;       // higher roots lie on top
+    const flick = (R() < 0.8 ? 1 : 0.25) * (0.13 + R() * 0.12) * (front > 0 ? 0.3 : 1), hookSteps = 4 + Math.floor(R() * 3);                                 // some tips kick outward
     const windK = o.windStrength * k.wind, ph1 = R() * 6.28, ph2 = R() * 6.28, curl = k.curl, fr = 0.55 + R() * 0.9;
-    const side = new THREE.Vector3();
-    for (let s = 1; s <= 34; s++) {
+    const side = new THREE.Vector3(), hout = new THREE.Vector3(), e = new THREE.Vector3();
+    let hook = 0;
+    for (let s = 1; s <= 40; s++) {
       const t = s / 20, lift = l0 + (l1 - l0) * Math.min(1, s / 7);
       side.crossVectors(d, outward(p)).normalize();
-      d.y -= o.gravity * (k.wisp ? 0.6 : 1);
-      d.addScaledVector(WIND, windK * t * t);
-      d.addScaledVector(side, Math.sin(s * 0.55 * fr + ph1) * curl);
-      d.addScaledVector(outward(p), Math.sin(s * 0.4 * fr + ph2) * curl * 0.6);
-      if (p.y < endY + 0.5) { d.addScaledVector(outward(p), flick); d.y += flick * 0.55; }
+      hout.set(p.x / RAD.x, 0, (p.z - C.z) / RAD.z).normalize();                 // straight out from the head's axis
+      if (hook) { d.addScaledVector(hout, flick); d.y += flick * 0.6; }           // tip: curl outward and up
+      else {
+        d.y -= o.gravity * (k.wisp ? 0.6 : 1);
+        d.addScaledVector(WIND, windK * t * t);
+        d.addScaledVector(side, Math.sin(s * 0.55 * fr + ph1) * curl);
+        d.addScaledVector(outward(p), Math.sin(s * 0.4 * fr + ph2) * curl * 0.6);
+      }
       d.normalize();
-      const prev = p.clone(); p.addScaledVector(d, step);
-      const q = new THREE.Vector3().subVectors(p, C).divide(RAD), l = q.length();
-      if (l < lift) { q.multiplyScalar(lift / l).multiply(RAD); p.copy(C).add(q); d.subVectors(p, prev).normalize(); }
+      const prev = p.clone(); p.addScaledVector(d, hook ? step * 0.7 : step);
+      // keep outside the skull...
+      e.subVectors(p, C).divide(RAD); const l = e.length();
+      if (l < lift) { e.multiplyScalar(lift / l).multiply(RAD); p.copy(C).add(e); }
+      // ...and below it keep a bell-shaped silhouette instead of collapsing onto the neck
+      if (p.y < C.y && front === 0) {
+        const hr = Math.hypot(p.x / RAD.x, (p.z - C.z) / RAD.z), min = lift * Math.max(0.55, 1 - o.bell * (C.y - p.y));
+        if (hr < min) { p.x *= min / hr; p.z = C.z + (p.z - C.z) * min / hr; }
+      }
+      d.subVectors(p, prev).normalize();
       pts.push(p.clone());
-      if (p.y < endY && s > 5) break;
+      if (hook) { if (++hook > hookSteps) break; } else if (p.y < endY && s > 5) hook = 1;
     }
     return pts;
   }
@@ -138,12 +154,12 @@ export function buildHair(THREE, headMesh, frame, options = {}) {
   const clampOut = (p, lift) => { const e = q.subVectors(p, C).divide(RAD), l = e.length(); if (l < lift) p.copy(C).add(e.multiplyScalar(lift / l).multiply(RAD)); return p; };
   for (const gd of guides) {
     const wild = R() < o.wild;                                                     // some locks get caught by the wind
-    const k = { lift: R() * 0.025 + (wild ? 0.03 : 0), wind: wild ? 2.0 + R() * 1.6 : 0.25 + R() * 0.7, curl: 0.025 + R() * 0.04 };
+    const k = { lift: R() * 0.025 + (wild ? 0.03 : 0), wind: wild ? 2.0 + R() * 1.6 : 0.25 + R() * 0.7, curl: 0.035 + R() * 0.05 };
     const path = grow(gd.root, k), n = path.length, shade = 0.7 + R() * 0.6;
     const width = 0.11 + R() * 0.07, subs = R() < 0.3 ? 2 : 3, l0 = new THREE.Vector3().subVectors(gd.root, C).divide(RAD).length();
     for (let m = 0; m < subs + o.strays; m++) {
       const stray = m >= subs, side = stray ? (R() - 0.5) * 3 : (m - (subs - 1) / 2) * 1.25;   // position across the lock, in widths
-      const len = Math.max(5, Math.round(n * (stray ? 0.75 + R() * 0.35 : 0.8 + R() * 0.2)));
+      const len = Math.max(5, Math.round(n * (stray ? 0.75 + R() * 0.35 : side === 0 ? 1 : 0.82 + R() * 0.18)));
       const ph = R() * 6.28, amp = stray ? 0.1 * (0.5 + R()) : 0.012, pts = [];
       for (let i = 0; i < Math.min(len, n); i++) {
         const t = i / (n - 1), out = outward(path[i]);
@@ -152,7 +168,7 @@ export function buildHair(THREE, headMesh, frame, options = {}) {
         const spread = stray ? 1 + t * 2 : 1 + Math.max(0, t - 0.55) * 1.6;        // sub-locks lie side by side, then part at the tip
         const pnt = path[i].clone().addScaledVector(B, side * width * spread + Math.sin(i * 0.45 + ph) * amp * t * 3);
         pnt.addScaledVector(out, (stray ? 0.03 + Math.cos(i * 0.5 + ph) * amp * t * 2 : -Math.abs(side) * 0.012));
-        pts.push(clampOut(pnt, l0 + (1.03 - l0) * Math.min(1, i / 7)));
+        pts.push(clampOut(pnt, l0 + (o.volume - 0.07 - l0) * Math.min(1, i / 7)));
       }
       if (stray) tube(pts, 0.011 + R() * 0.01, 1, 3, shade * (0.9 + R() * 0.4), R());
       else tube(pts, width * (0.85 + R() * 0.3), 0.2, 6, shade * (0.88 + R() * 0.24), R());
