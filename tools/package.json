@@ -1,0 +1,8 @@
+{
+  "name": "jianmo-tools",
+  "private": true,
+  "description": "Model inspection and headless screenshot scripts",
+  "dependencies": {
+    "three": "^0.170.0"
+  }
+}
