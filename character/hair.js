@@ -15,8 +15,10 @@ function rng(seed) {
 
 export const HAIR_DEFAULTS = {
   seed: 7,
-  locks: 620,          // thick tapered locks
-  wisps: 260,          // thin stray hairs
+  clumps: 150,          // guide strands; each one carries a bundle of locks
+  clumpSpacing: 0.24,   // minimum distance between guide roots (eye-gap units)
+  strays: 1,           // thin stray hairs per lock
+  wild: 0.1,           // share of locks blown out by the wind
   skull: { c: [0, 0.55, -1.17], r: [1.3, 1.62, 1.5] },   // measured on assets/bald.glb
   crown: [0.12, 2.1, -1.45],
   wind: [-0.85, 0.12, -0.5],    // blows toward the character's right and back
@@ -66,7 +68,7 @@ export function buildHair(THREE, headMesh, frame, options = {}) {
     const n = outward(root), az = Math.atan2(root.x, root.z - C.z);            // 0 = front, ±π = back
     const front = Math.max(0, 1 - Math.abs(az) / 1.0), back = Math.max(0, (Math.abs(az) - 1.9) / 1.2);
     // where the strand stops: fringe at eye level (a few reach the nose), sides at the jaw, back at the nape
-    let endY = front > 0 ? 0.6 - R() * 0.65 - (R() < 0.2 ? 0.55 : 0) : -0.25 - R() * 1.15 - back * 0.3;      // layered: lengths vary a lot
+    let endY = front > 0 ? 0.6 - R() * 0.5 - (R() < 0.18 ? 0.6 : 0) : root.y - 1.75 - R() * 0.6 - back * 0.2;     // tiers: higher roots end higher
     if (k.wisp) endY += 0.35;
     const flow = new THREE.Vector3().subVectors(root, CROWN); flow.addScaledVector(n, -flow.dot(n)).normalize();
     // swirl the flow a little so the parting is not a perfect star
@@ -75,7 +77,7 @@ export function buildHair(THREE, headMesh, frame, options = {}) {
     const step = 0.13, pts = [root.clone()], p = root.clone();
     const l0 = new THREE.Vector3().subVectors(root, C).divide(RAD).length();                // the real scalp is not exactly the ellipsoid
     const l1 = 1.05 + k.lift * 2.5 + 0.06 * Math.min(1, Math.max(0, (root.y - 0.4) / 1.7));       // higher roots lie on top
-    const flick = (R() < 0.45 ? 1 : 0) * (0.05 + R() * 0.1);                                 // some tips kick outward
+    const flick = (R() < 0.75 ? 1 : 0.2) * (0.1 + R() * 0.14) * (front > 0 ? 0.3 : 1);                                 // some tips kick outward
     const windK = o.windStrength * k.wind, ph1 = R() * 6.28, ph2 = R() * 6.28, curl = k.curl, fr = 0.55 + R() * 0.9;
     const side = new THREE.Vector3();
     for (let s = 1; s <= 34; s++) {
@@ -85,7 +87,7 @@ export function buildHair(THREE, headMesh, frame, options = {}) {
       d.addScaledVector(WIND, windK * t * t);
       d.addScaledVector(side, Math.sin(s * 0.55 * fr + ph1) * curl);
       d.addScaledVector(outward(p), Math.sin(s * 0.4 * fr + ph2) * curl * 0.6);
-      if (p.y < endY + 0.45) d.addScaledVector(outward(p), flick);
+      if (p.y < endY + 0.5) { d.addScaledVector(outward(p), flick); d.y += flick * 0.55; }
       d.normalize();
       const prev = p.clone(); p.addScaledVector(d, step);
       const q = new THREE.Vector3().subVectors(p, C).divide(RAD), l = q.length();
@@ -105,7 +107,7 @@ export function buildHair(THREE, headMesh, frame, options = {}) {
       const t = i / (n - 1);
       T.subVectors(pts[Math.min(n - 1, i + 1)], pts[Math.max(0, i - 1)]).normalize();
       N.copy(outward(pts[i])); B.crossVectors(T, N).normalize(); N.crossVectors(B, T).normalize();
-      const r = radius * Math.pow(Math.sin(Math.PI * Math.min(1, 0.18 + t * 0.82)), 0.75) * (1 - t * 0.25);
+      const r = radius * Math.min(1, 0.45 + t * 4) * (t < 0.5 ? 1 : Math.pow(Math.max(0, 1 - (t - 0.5) / 0.5), 0.85));   // full width, then a long pointed tip
       for (let j = 0; j < sides; j++) {
         const a = (j / sides) * Math.PI * 2, cb = Math.cos(a), cn = Math.sin(a);
         q.copy(pts[i]).addScaledVector(B, cb * r).addScaledVector(N, cn * r * flat);
@@ -121,14 +123,40 @@ export function buildHair(THREE, headMesh, frame, options = {}) {
       index.push(a, c, b, b, c, d);
     }
   }
-  for (let i = 0; i < o.locks; i++) {
-    const wild = R() < 0.14;                                    // a few locks get caught by the wind
-    const k = { lift: R() * 0.03 + (wild ? 0.04 : 0), wind: wild ? 2.2 + R() * 1.5 : 0.35 + R() * 0.9, curl: 0.04 + R() * 0.06 + (wild ? 0.03 : 0) };
-    tube(grow(pickRoot(), k), 0.1 + R() * 0.1, 0.32, 5, 0.8 + R() * 0.5, R());
+  // ---- locks. Structure copied from the wig model the user generated (see README):
+  //   * hair near the scalp is one smooth shell; separate locks only show in the lower part
+  //   * a lock is a broad, flat ribbon, not a round strand
+  //   * each lock splits into two or three pointed tips of different lengths
+  //   * locks are layered like roof tiles: the higher the root, the higher the lock ends
+  //   * tips hook outward
+  const guides = [];
+  for (let tries = 0; guides.length < o.clumps && tries < 40000; tries++) {
+    const r = pickRoot();
+    if (r.distanceTo(CROWN) < 0.3) continue;                                       // the shell covers the whorl itself
+    if (guides.every(gd => gd.root.distanceToSquared(r) > o.clumpSpacing * o.clumpSpacing)) guides.push({ root: r });
   }
-  for (let i = 0; i < o.wisps; i++) {
-    const k = { wisp: true, lift: 0.01 + R() * 0.07, wind: 0.5 + R() * 2.5, curl: 0.04 + R() * 0.07 };
-    tube(grow(pickRoot(), k), 0.011 + R() * 0.01, 1, 3, 0.9 + R() * 0.5, R());
+  const clampOut = (p, lift) => { const e = q.subVectors(p, C).divide(RAD), l = e.length(); if (l < lift) p.copy(C).add(e.multiplyScalar(lift / l).multiply(RAD)); return p; };
+  for (const gd of guides) {
+    const wild = R() < o.wild;                                                     // some locks get caught by the wind
+    const k = { lift: R() * 0.025 + (wild ? 0.03 : 0), wind: wild ? 2.0 + R() * 1.6 : 0.25 + R() * 0.7, curl: 0.025 + R() * 0.04 };
+    const path = grow(gd.root, k), n = path.length, shade = 0.7 + R() * 0.6;
+    const width = 0.11 + R() * 0.07, subs = R() < 0.3 ? 2 : 3, l0 = new THREE.Vector3().subVectors(gd.root, C).divide(RAD).length();
+    for (let m = 0; m < subs + o.strays; m++) {
+      const stray = m >= subs, side = stray ? (R() - 0.5) * 3 : (m - (subs - 1) / 2) * 1.25;   // position across the lock, in widths
+      const len = Math.max(5, Math.round(n * (stray ? 0.75 + R() * 0.35 : 0.8 + R() * 0.2)));
+      const ph = R() * 6.28, amp = stray ? 0.1 * (0.5 + R()) : 0.012, pts = [];
+      for (let i = 0; i < Math.min(len, n); i++) {
+        const t = i / (n - 1), out = outward(path[i]);
+        T.subVectors(path[Math.min(n - 1, i + 1)], path[Math.max(0, i - 1)]).normalize();
+        B.crossVectors(T, out).normalize();
+        const spread = stray ? 1 + t * 2 : 1 + Math.max(0, t - 0.55) * 1.6;        // sub-locks lie side by side, then part at the tip
+        const pnt = path[i].clone().addScaledVector(B, side * width * spread + Math.sin(i * 0.45 + ph) * amp * t * 3);
+        pnt.addScaledVector(out, (stray ? 0.03 + Math.cos(i * 0.5 + ph) * amp * t * 2 : -Math.abs(side) * 0.012));
+        pts.push(clampOut(pnt, l0 + (1.03 - l0) * Math.min(1, i / 7)));
+      }
+      if (stray) tube(pts, 0.011 + R() * 0.01, 1, 3, shade * (0.9 + R() * 0.4), R());
+      else tube(pts, width * (0.85 + R() * 0.3), 0.2, 6, shade * (0.88 + R() * 0.24), R());
+    }
   }
   const g = new THREE.BufferGeometry();
   g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
@@ -152,7 +180,7 @@ export function buildHair(THREE, headMesh, frame, options = {}) {
   const cp = [], ci = [], map = new Map(), n3 = headMesh.geometry.attributes.normal;
   for (const i of tris) for (let k = 0; k < 3; k++) {
     const v = idx[i + k];
-    if (!map.has(v)) { map.set(v, cp.length / 3); cp.push(P.getX(v) + n3.getX(v) * gap * 0.012, P.getY(v) + n3.getY(v) * gap * 0.012, P.getZ(v) + n3.getZ(v) * gap * 0.012); }
+    if (!map.has(v)) { map.set(v, cp.length / 3); cp.push(P.getX(v) + n3.getX(v) * gap * 0.03, P.getY(v) + n3.getY(v) * gap * 0.03, P.getZ(v) + n3.getZ(v) * gap * 0.03); }
     ci.push(map.get(v));
   }
   const cg = new THREE.BufferGeometry(); cg.setAttribute('position', new THREE.Float32BufferAttribute(cp, 3)); cg.setIndex(ci); cg.computeVertexNormals();
