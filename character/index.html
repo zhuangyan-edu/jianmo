@@ -3,14 +3,27 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>角色转台</title>
-<style>html,body{margin:0;height:100%;background:#1b1e26;overflow:hidden}canvas{display:block;width:100%;height:100%}</style>
+<style>
+html,body{margin:0;height:100%;background:#1b1e26;overflow:hidden}canvas{display:block;width:100%;height:100%}
+#bar{position:fixed;left:0;right:0;bottom:0;display:flex;flex-wrap:wrap;gap:8px;justify-content:center;padding:12px 16px calc(12px + env(safe-area-inset-bottom))}
+#bar button{font:14px/1 system-ui,sans-serif;color:#e8ecf3;background:rgba(20,24,32,.72);border:1px solid rgba(255,255,255,.22);border-radius:999px;padding:10px 16px;cursor:pointer}
+#bar button[aria-pressed=true]{background:#dfe8f7;color:#141820;border-color:#dfe8f7}
+#bar button:focus-visible{outline:2px solid #8fc8ff;outline-offset:2px}
+</style>
 <canvas id="gl"></canvas>
+<div id="bar">
+  <button id="b-look" type="button">最终光照</button>
+  <button id="b-glow" type="button">眼睛发光</button>
+  <button id="b-spark" type="button">电光</button>
+  <button id="b-spin" type="button">转台</button>
+</div>
 <script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.min.js","three/addons/":"https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"}}</script>
 <script type="module">
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { buildHair } from './hair.js';
+import { createLook } from './look.js';
 
 const Q = new URLSearchParams(location.search);
 const canvas = document.getElementById('gl');
@@ -20,8 +33,9 @@ const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x8a8f98);
 const camera = new THREE.PerspectiveCamera(30, 1, 0.01, 100);
 const controls = new OrbitControls(camera, canvas);
-scene.add(new THREE.HemisphereLight(0xffffff, 0x555555, 2.2));
-const sun = new THREE.DirectionalLight(0xffffff, 2); sun.position.set(1, 2, 3); scene.add(sun);
+// look=final (default): backlit rig with rim light, skin translucency, eye glow and bloom (look.js).  look=flat: plain even light for checking the models.
+const look = createLook(THREE, renderer, scene, camera, Q);
+const sun = look.sun;
 
 const load = url => new Promise((ok, bad) => new GLTFLoader().load(url, ok, undefined, bad));
 // head=head (default): the scan with its own messy hair, used as is.  head=bald: clean bald scan (kept for comparison),
@@ -172,21 +186,34 @@ if (wigG) {
   wigG.scene.traverse(o => { if (o.isMesh) o.material = new THREE.MeshStandardMaterial({ color: 0x2a2226, roughness: 0.7, side: THREE.DoubleSide }); });
   wig.add(wigG.scene); setWig({}); headBone.add(wig);
 }
+{
+  const eR = new THREE.Vector3(...SCAN.eyeR), eL = new THREE.Vector3(...SCAN.eyeL);
+  head.traverse(o => { if (o.isMesh) look.dress(o, { eyes: [eR, eL], root: head }); });
+  look.dress(skinned, {});
+  if (wigG) wig.traverse(o => { if (o.isMesh) look.dress(o, {}); });
+}
 if (Q.get('mode') === 'head') { scene.remove(body); scene.add(pivot); } else if (Q.get('mode') !== 'body') headBone.add(pivot);
 
-function resize() { const w = canvas.clientWidth, h = canvas.clientHeight; renderer.setSize(w, h, false); camera.aspect = w / h; camera.updateProjectionMatrix(); }
+function resize() { const w = canvas.clientWidth, h = canvas.clientHeight; renderer.setSize(w, h, false); look.resize(w, h); camera.aspect = w / h; camera.updateProjectionMatrix(); }
 addEventListener('resize', resize); resize();
 const box = new THREE.Box3().setFromObject(Q.get('mode') === 'head' ? pivot : body), ctr = box.getCenter(new THREE.Vector3()), size = box.getSize(new THREE.Vector3());
 function view(az = 0, el = 0.05, dist = size.y * 2.4, t = [ctr.x, ctr.y, ctr.z]) {
   controls.target.set(...t);
   camera.position.set(t[0] + dist * Math.sin(az) * Math.cos(el), t[1] + dist * Math.sin(el), t[2] + dist * Math.cos(az) * Math.cos(el));
-  controls.update(); scene.updateMatrixWorld(true); camera.updateMatrixWorld(true); if (hair) hair.update(0, camera, sun.position); renderer.render(scene, camera);
+  controls.update(); scene.updateMatrixWorld(true); camera.updateMatrixWorld(true); if (hair) hair.update(0, camera, sun.position); look.render();
 }
 view();
 const clock = new THREE.Clock();
-renderer.setAnimationLoop(() => { controls.update(); if (hair && !window.__freeze) hair.update(clock.getElapsedTime(), camera, sun.position); renderer.render(scene, camera); });
+const ui = { look: Q.get('look') !== 'flat', glow: Q.get('glow') === '1', spark: Q.get('spark') !== '0', spin: Q.get('spin') === '1' };
+function sync() {
+  look.set(ui); controls.autoRotate = ui.spin;
+  for (const k in ui) document.getElementById('b-' + k).setAttribute('aria-pressed', ui[k]);
+}
+for (const k in ui) document.getElementById('b-' + k).onclick = () => { ui[k] = !ui[k]; sync(); };
+controls.autoRotateSpeed = 4; sync();
+renderer.setAnimationLoop(() => { const t = clock.getElapsedTime(); controls.update(); if (hair && !window.__freeze) hair.update(t, camera, sun.position); look.render(window.__freeze ? 0 : t); });
 const wp = b => b.getWorldPosition(new THREE.Vector3()).toArray().map(v => +v.toFixed(3));
 console.log('INFO', JSON.stringify({ box: [box.min.toArray(), box.max.toArray()].map(a => a.map(v => +v.toFixed(3))), head: wp(headBone), neck: wp(bone('Neck')), hips: wp(bone('Hips')) }));
-Object.assign(window, { __view: view, __setHead: setHead, __setWig: setWig, wig, __ready: true, THREE, scene, camera, pivot, body, headBone });
+Object.assign(window, { __look: o => { Object.assign(ui, o); sync(); }, look, __view: view, __setHead: setHead, __setWig: setWig, wig, __ready: true, THREE, scene, camera, pivot, body, headBone });
 </script>
 </html>
