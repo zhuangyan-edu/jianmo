@@ -167,11 +167,11 @@ const box = new THREE.Box3().setFromObject(Q.get('mode') === 'head' ? pivot : bo
 function view(az = 0, el = 0.05, dist = size.y * 2.4, t = [ctr.x, ctr.y, ctr.z]) {
   controls.target.set(...t);
   camera.position.set(t[0] + dist * Math.sin(az) * Math.cos(el), t[1] + dist * Math.sin(el), t[2] + dist * Math.cos(az) * Math.cos(el));
-  controls.update(); scene.updateMatrixWorld(true); renderer.render(scene, camera);
+  controls.update(); scene.updateMatrixWorld(true); camera.updateMatrixWorld(true); if (hair) hair.update(0, camera, sun.position); renderer.render(scene, camera);
 }
 view();
 const clock = new THREE.Clock();
-renderer.setAnimationLoop(() => { if (hair) hair.uniforms.uTime.value = clock.getElapsedTime(); controls.update(); renderer.render(scene, camera); });
+renderer.setAnimationLoop(() => { controls.update(); if (hair && !window.__freeze) hair.update(clock.getElapsedTime(), camera, sun.position); renderer.render(scene, camera); });
 const wp = b => b.getWorldPosition(new THREE.Vector3()).toArray().map(v => +v.toFixed(3));
 console.log('INFO', JSON.stringify({ box: [box.min.toArray(), box.max.toArray()].map(a => a.map(v => +v.toFixed(3))), head: wp(headBone), neck: wp(bone('Neck')), hips: wp(bone('Hips')) }));
 Object.assign(window, { __view: view, __setHead: setHead, __setWig: setWig, wig, __ready: true, THREE, scene, camera, pivot, body, headBone });
