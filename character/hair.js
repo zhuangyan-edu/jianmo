@@ -31,14 +31,14 @@ function noise3(x, y, z) {
 
 export const HAIR_DEFAULTS = {
   seed: 7,
-  whorl: 22,            // extra locks around the crown so the whorl closes
-  fringe: 14,           // extra locks over the forehead, where the face would otherwise show a bare hairline
-  sectionSize: 0.62,    // spacing of section centres: smaller = more, smaller sections
-  clumps: 150,          // locks
-  clumpSpacing: 0.235,   // minimum distance between lock roots (eye-gap units)
+  whorl: 16,            // extra locks around the crown so the whorl closes
+  fringe: 18,           // extra locks over the forehead, where the face would otherwise show a bare hairline
+  sectionSize: 0.95,    // spacing of section centres: smaller = more, smaller sections
+  clumps: 125,          // locks
+  clumpSpacing: 0.26,   // minimum distance between lock roots (eye-gap units)
   strays: 0,            // thin stray hairs travelling with each lock
-  flyaways: 16,         // long thin hairs carried off by the wind
-  surface: 12,          // thin hairs lying across the top of the locks
+  flyaways: 10,         // long thin hairs carried off by the wind
+  surface: 8,          // thin hairs lying across the top of the locks
   skull: { c: [0, 0.55, -1.17], r: [1.3, 1.62, 1.5] },   // measured on assets/bald.glb
   crown: [0.12, 2.1, -1.45],
   wind: [-0.85, 0.1, -0.5],     // blows toward the character's right and back
@@ -46,7 +46,8 @@ export const HAIR_DEFAULTS = {
   gravity: 0.14,
   part: 0.3,            // x of the fringe parting: locks sweep away from it to either side
   volume: 1.1,          // how far the outer layer stands off the skull (1 = on the skull)
-  bell: 0.16,           // how slowly the silhouette narrows below the skull; smaller = fuller
+  tuck: 0.05,           // how strongly locks below the ears curve back in toward the neck
+  bell: 0.3,           // how slowly the silhouette narrows below the skull; smaller = fuller
   cutLong: 3.1,         // lock length at the crown (eye-gap units)
   cutShort: 0.6,        // lock length at the nape and temples
   wave: 0.145,          // strength of the long S-bends
@@ -96,13 +97,13 @@ export function buildHair(THREE, headMesh, frame, options = {}) {
 
   // ---- sections: the style parameters that all locks growing from one patch of scalp share
   const makeSection = centre => {
-    const wild = centre ? centre.y < 1.75 && R() < 0.05 + 0.4 * lee(centre) : false;                   // whole sections on the lee side get caught by the wind
+    const wild = centre ? centre.y < 1.4 && R() < 0.03 + 0.25 * lee(centre) : false;                   // whole sections on the lee side get caught by the wind
     return {
       centre, len: R(), long: R() < 0.16, swirl: (R() - 0.5) * 1.5 + 0.2, sweep: R(),
-      flick: (R() < 0.8 ? 1 : 0.3) * (0.13 + R() * 0.12), hookSteps: 4 + Math.floor(R() * 4),
+      flick: 0.13 + R() * 0.12, out: R() < 0.3, hookSteps: 4 + Math.floor(R() * 4),
       curly: R() < 0.45 ? (R() < 0.5 ? 1 : -1) * (0.05 + R() * 0.1) : 0,
       wPhase: R() * 6.28, wFreq: 0.2 + R() * 0.1, wAmp: 0.6 + R() * 0.8, ph1: R() * 6.28, ph2: R() * 6.28, fr: 0.55 + R() * 0.9,
-      wild, wind: wild ? 2.2 + R() * 1.8 : 0.25 + R() * 0.7, lift: R() * 0.02 + (wild ? 0.03 : 0), gravity: wild ? 0.75 : 1, shade: 0.8 + R() * 0.45,
+      wild, wind: wild ? 1.5 + R() * 1.2 : 0.25 + R() * 0.7, lift: R() * 0.02 + (wild ? 0.03 : 0), gravity: wild ? 0.75 : 1, shade: 0.8 + R() * 0.45,
     };
   };
   const sections = [];
@@ -121,24 +122,24 @@ export function buildHair(THREE, headMesh, frame, options = {}) {
     const front = Math.max(0, 1 - Math.abs(az) / 1.0), back = Math.max(0, (Math.abs(az) - 1.9) / 1.2);
     // where the strand stops: fringe around the eyes (a few reach the nose); elsewhere tiered by root height
     const len = S.len * 0.8 + R() * 0.2;                                           // mostly the section's length, a little of its own
-    let endY = front > 0 ? 0.8 - len * 0.45 - (S.long ? 0.8 : 0) : -1.15 - len * 0.3 - back * 0.1;
+    let endY = front > 0 ? 0.8 - len * 0.45 - (S.long ? 0.8 : 0) : -0.25 - len * 1.25 - back * 0.1;
     if (k.endY !== undefined) endY = k.endY;
     // length of the cut: long on top, short at the temples and the nape
     const high = Math.min(1, Math.max(0, (root.y + 0.6) / 2.7));
-    const cut = (o.cutShort + (o.cutLong - o.cutShort) * Math.pow(high, 1.25)) * (0.7 + len * 0.6);
+    const cut = (o.cutShort + (o.cutLong - o.cutShort) * Math.pow(high, 1.25)) * (0.5 + 0.3 * high + len * (0.95 - 0.5 * high));
     const flow = V().subVectors(root, CROWN); flow.addScaledVector(n, -flow.dot(n)).normalize();
     flow.applyAxisAngle(n, (k.swirl ?? S.swirl));
     // pull toward the section's own direction, so its locks run parallel instead of fanning out (matters most at the crown)
     // (not right at the whorl, where that would send locks uphill across the crown)
-    if (S.dir) { const far = Math.min(1, Math.max(0, (root.distanceTo(CROWN) - 0.45) / 0.6)); flow.lerp(S.dir, 0.65 * far); flow.addScaledVector(n, -flow.dot(n)).normalize(); }   // not a perfect star
+    if (S.dir) { const far = Math.min(1, Math.max(0, (root.distanceTo(CROWN) - 0.45) / 0.6)); flow.lerp(S.dir, 0.5 * far); flow.addScaledVector(n, -flow.dot(n)).normalize(); }   // not a perfect star
     // fringe: sweep diagonally away from the parting instead of falling straight down
     if (front > 0.15) { flow.x += Math.sign(S.centre ? S.centre.x - o.part : root.x - o.part) * (0.12 + S.sweep * 0.45) * front; flow.addScaledVector(n, -flow.dot(n)).normalize(); }
     const d = flow.clone().addScaledVector(n, 0.04 + k.lift * 1.5).normalize();
     const step = 0.13, pts = [root.clone()], p = root.clone();
     const l0 = shell(root);                                                        // the real scalp is not exactly the ellipsoid
     const l1 = o.volume - 0.05 + k.lift * 2.5 + 0.07 * Math.min(1, Math.max(0, (root.y - 0.4) / 1.7)) + front * 0.05;   // higher roots lie on top
-    const flick = S.flick * (front > 0 ? 0.3 : 1) * (k.flick ?? 1) * Math.min(1, 0.25 + high * 1.6), hookSteps = S.hookSteps;
-    const curly = S.curly;                                                         // the whole section twists the same way as it hooks
+    const flick = S.flick * (front > 0 ? 0.3 : 1) * (k.flick ?? 1) * Math.min(1, 0.25 + high * 1.6), hookSteps = S.wild ? 3 : S.hookSteps;
+    const curly = S.wild ? 0 : S.curly, outFlick = S.out || S.wild || front > 0, tuck = S.wild ? 0 : o.tuck;                                                         // the whole section twists the same way as it hooks
     const windK = o.windStrength * k.wind * (0.45 + 1.3 * lee(root)), g = o.gravity * (k.gravity ?? 1);
     // long S-bend, shared by the section
     const wPhase = S.wPhase + (R() - 0.5) * 0.25, wFreq = S.wFreq, wAmp = o.wave * (k.wave ?? 1) * S.wAmp;
@@ -149,9 +150,10 @@ export function buildHair(THREE, headMesh, frame, options = {}) {
       const t = s / 20, lift = l0 + (l1 - l0) * Math.min(1, s / 7);
       side.crossVectors(d, outward(p)).normalize();
       hout.set(p.x / RAD.x, 0, (p.z - C.z) / RAD.z).normalize();                  // straight out from the head's axis
-      if (hook) { d.addScaledVector(hout, flick); d.y += flick * 0.6; d.addScaledVector(side, curly); }   // tip: curl outward and up
+      if (hook) { if (outFlick) { d.addScaledVector(hout, flick); d.y += flick * 0.6; } else d.addScaledVector(hout, -flick * 0.45); d.addScaledVector(side, curly); }   // tip: curl outward and up
       else {
         d.y -= g;
+        if (front === 0 && p.y < 0.5) d.addScaledVector(hout, -tuck * Math.min(1, (0.5 - p.y) / 0.6));   // round silhouette: tuck in below the ears
         d.addScaledVector(WIND, windK * t * t);
         d.addScaledVector(side, Math.sin(wPhase + s * wFreq) * wAmp * Math.min(1, s / 6));
         d.addScaledVector(side, Math.sin(s * 0.55 * fr + ph1) * k.curl);
@@ -164,7 +166,7 @@ export function buildHair(THREE, headMesh, frame, options = {}) {
       if (l < lift) { e.multiplyScalar(lift / l).multiply(RAD); p.copy(C).add(e); }
       // ...and below it keep a bell-shaped silhouette instead of collapsing onto the neck
       if (p.y < C.y && front === 0) {
-        const hr = Math.hypot(p.x / RAD.x, (p.z - C.z) / RAD.z), min = lift * Math.max(0.55, 1 - o.bell * (C.y - p.y));
+        const hr = Math.hypot(p.x / RAD.x, (p.z - C.z) / RAD.z), min = lift * Math.max(0.5, 1 - o.bell * Math.pow(C.y - p.y, 1.5));
         if (hr < min) { p.x *= min / hr; p.z = C.z + (p.z - C.z) * min / hr; }
       }
       d.subVectors(p, prev).normalize();
@@ -214,14 +216,15 @@ export function buildHair(THREE, headMesh, frame, options = {}) {
   }
   for (let tries = 0, made = 0; made < o.whorl && tries < 40000; tries++) {       // close the whorl at the crown
     const r = pickRoot();
-    if (r.distanceTo(CROWN) < 0.5) { guides.push({ root: r }); made++; }
+    if (r.distanceTo(CROWN) < 0.5) { guides.push({ root: r, whorl: true }); made++; }
   }
   for (const gd of guides) {
     const sec = sectionOf(gd.root);
     const k = { sec, lift: sec.lift + R() * 0.008, wind: sec.wind, curl: 0.004 + R() * 0.008, gravity: sec.gravity };
     const path = grow(gd.root, k), n = path.length, shade = sec.shade * (0.92 + R() * 0.16);
-    const big = gd.fringe ? R() * 0.6 : R(), width = big < 0.25 ? 0.2 + R() * 0.07 : big < 0.75 ? 0.14 + R() * 0.05 : 0.085 + R() * 0.03;   // a few heavy locks, many medium, some thin
-    const subs = width > 0.19 ? 3 : width > 0.12 ? 2 : 1, l0 = shell(gd.root);
+    let width; const big = gd.fringe ? R() * 0.6 : R(); width = big < 0.3 ? 0.3 + R() * 0.08 : big < 0.8 ? 0.21 + R() * 0.06 : 0.12 + R() * 0.04;   // a few heavy locks, many medium, some thin
+    const near = gd.root.distanceTo(CROWN) < 0.6; if (near) width = Math.min(width, 0.15);   // thin at the whorl, or they pile up into a knot
+    const subs = width > 0.29 ? 2 : 1, l0 = shell(gd.root);
     const strays = Math.floor(o.strays + R());
     for (let m = 0; m < subs + strays; m++) {
       const stray = m >= subs, side = stray ? (R() - 0.5) * 3 : (m - (subs - 1) / 2) * 1.2;   // position across the lock, in widths
@@ -232,12 +235,12 @@ export function buildHair(THREE, headMesh, frame, options = {}) {
         T.subVectors(path[Math.min(n - 1, i + 1)], path[Math.max(0, i - 1)]).normalize();
         B.crossVectors(T, out).normalize();
         const spread = stray ? 1 + t * 2 : 1 + Math.max(0, t - split) * 1.8;       // sub-locks lie side by side, then part at the tip
-        const pnt = path[i].clone().addScaledVector(B, side * width * 0.62 * spread + Math.sin(i * 0.45 + ph) * amp * t * 3);
+        const pnt = path[i].clone().addScaledVector(B, side * width * 0.5 * spread + Math.sin(i * 0.45 + ph) * amp * t * 3);
         pnt.addScaledVector(out, stray ? 0.03 + Math.cos(i * 0.5 + ph) * amp * t * 2 : -Math.abs(side) * 0.01);
         pts.push(clampOut(pnt, l0 + (o.volume - 0.07 - l0) * Math.min(1, i / 7)));
       }
       if (stray) tube(pts, 0.009 + R() * 0.008, 1, 3, shade * (0.9 + R() * 0.4), R(), 0.7);
-      else tube(pts, width * 0.62 * (0.9 + R() * 0.25), 0.22, 6, shade * (0.9 + R() * 0.2), R(), split - 0.05);
+      else tube(pts, width * (subs > 1 ? 0.5 : 0.8) * (0.9 + R() * 0.25), 0.2, 6, shade * (0.9 + R() * 0.2), R(), split - 0.05);
     }
   }
   // ---- long thin hairs carried off by the wind, mostly from the lee side
