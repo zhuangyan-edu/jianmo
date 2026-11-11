@@ -32,6 +32,8 @@ const body = bodyG.scene; scene.add(body); body.updateMatrixWorld(true);
 let skinned; body.traverse(o => { if (o.isSkinnedMesh) skinned = o; });
 skinned.frustumCulled = false;
 const bones = skinned.skeleton.bones, bone = n => bones.find(b => b.name.endsWith(n));
+const NECK_FULL_W = +(Q.get('nfw') ?? 0.75), NECK_FULL_Y = +(Q.get('nfy') ?? 0.83);   // triangles this strongly bound to neck/head, above this height, are neck skin for sure
+const NECK_PAINT_Y = 0.785;   // bind-pose height above which exposed body skin is repainted (just above the tie knot)
 const headBone = bone('Head'), headIdx = bones.indexOf(headBone);
 {
   const g = skinned.geometry, si = g.attributes.skinIndex, sw = g.attributes.skinWeight, idx = g.index.array;
@@ -40,6 +42,44 @@ const headBone = bone('Head'), headIdx = bones.indexOf(headBone);
   const thr = +(Q.get('cut') ?? 0.5), keep = [];
   for (let i = 0; i < idx.length; i += 3) if (Math.max(hw[idx[i]], hw[idx[i + 1]], hw[idx[i + 2]]) <= thr) keep.push(idx[i], idx[i + 1], idx[i + 2]);
   if (Q.get('mode') !== 'body') g.setIndex(keep);
+}
+
+// The body's neck and upper chest still carry dark smears baked in from the old hair.
+// Repaint every non-white texel (i.e. not shirt collar) of that region with a flat skin tone.
+const SKIN = [236, 200, 194];
+{
+  const g = skinned.geometry, P = g.attributes.position, U = g.attributes.uv, idx = g.index.array, mat = skinned.material;
+  const si = g.attributes.skinIndex, sw = g.attributes.skinWeight, neckIdx = bones.indexOf(bone('Neck')), nw = new Float32Array(P.count);
+  for (let i = 0; i < P.count; i++) for (let k = 0; k < 4; k++) { const b = si.getComponent(i, k); if (b === neckIdx || b === headIdx) nw[i] += sw.getComponent(i, k); }
+  const img = mat.map.image, W = img.width, H = img.height;
+  const tex = document.createElement('canvas'); tex.width = W; tex.height = H;
+  const tc = tex.getContext('2d', { willReadFrequently: true }); tc.drawImage(img, 0, 0);
+  const mask = document.createElement('canvas'); mask.width = W; mask.height = H;
+  const mc = mask.getContext('2d', { willReadFrequently: true }); mc.fillStyle = '#fff'; mc.strokeStyle = '#fff'; mc.lineWidth = 3;
+  const mask2 = document.createElement('canvas'); mask2.width = W; mask2.height = H;   // triangles that are neck proper: repaint fully
+  const m2 = mask2.getContext('2d', { willReadFrequently: true }); m2.fillStyle = '#fff'; m2.strokeStyle = '#fff'; m2.lineWidth = 3;
+  let x0 = W, y0 = H, x1 = 0, y1 = 0;
+  for (let i = 0; i < idx.length; i += 3) {
+    const t = [idx[i], idx[i + 1], idx[i + 2]];
+    const cy = (P.getY(t[0]) + P.getY(t[1]) + P.getY(t[2])) / 3, cx = (P.getX(t[0]) + P.getX(t[1]) + P.getX(t[2])) / 3;
+    if (cy < NECK_PAINT_Y || Math.abs(cx) > 0.07) continue;
+    mc.beginPath();
+    t.forEach((v, k) => { const x = U.getX(v) * W, y = U.getY(v) * H; k ? mc.lineTo(x, y) : mc.moveTo(x, y); x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); });
+    mc.closePath(); mc.fill(); mc.stroke();
+    if (Math.min(nw[t[0]], nw[t[1]], nw[t[2]]) > NECK_FULL_W && cy > NECK_FULL_Y) { m2.beginPath(); t.forEach((v, k) => { const x = U.getX(v) * W, y = U.getY(v) * H; k ? m2.lineTo(x, y) : m2.moveTo(x, y); }); m2.closePath(); m2.fill(); m2.stroke(); }
+  }
+  x0 = Math.max(0, Math.floor(x0) - 2); y0 = Math.max(0, Math.floor(y0) - 2); x1 = Math.min(W, Math.ceil(x1) + 2); y1 = Math.min(H, Math.ceil(y1) + 2);
+  if (x1 > x0 && y1 > y0) {
+    const m = mc.getImageData(x0, y0, x1 - x0, y1 - y0).data, mm = m2.getImageData(x0, y0, x1 - x0, y1 - y0).data, d = tc.getImageData(x0, y0, x1 - x0, y1 - y0);
+    for (let k = 0; k < m.length; k += 4) {
+      if (m[k] < 128) continue;
+      const r = d.data[k], gg = d.data[k + 1], b = d.data[k + 2], white = mm[k] < 128 && Math.min(r, gg, b) > 180 && Math.max(r, gg, b) - Math.min(r, gg, b) < 22;
+      if (!white) { d.data[k] = SKIN[0]; d.data[k + 1] = SKIN[1]; d.data[k + 2] = SKIN[2]; }
+    }
+    tc.putImageData(d, x0, y0);
+    const nt = new THREE.CanvasTexture(tex); nt.flipY = mat.map.flipY; nt.colorSpace = mat.map.colorSpace; nt.wrapS = mat.map.wrapS; nt.wrapT = mat.map.wrapT; nt.anisotropy = 8;
+    mat.map = nt; mat.needsUpdate = true;
+  }
 }
 
 // ---- head: align the scanned head to the head bone
@@ -53,7 +93,8 @@ const SCANS = {
 };
 const SCAN = SCANS[HEAD_SRC];
 // Where the eyes should sit on the rigged body (bind pose, world units) and how far apart.
-const HEAD = { eyeY: 0.902, eyeZ: 0.062, eyeGap: 0.046, pitch: 0, yaw: 0, roll: 0 };
+const HEAD = { eyeY: 0.897, eyeZ: 0.062, eyeGap: 0.042, pitch: 0, yaw: 0, roll: 0 };
+const NECK_KEEP = +(Q.get('nk') ?? 0.55);   // how far below the chin the scan's neck is kept, in eye-gap units
 const bindHeadInv = headBone.matrixWorld.clone().invert();
 function setHead(o) {
   Object.assign(HEAD, o);
@@ -72,9 +113,29 @@ function setHead(o) {
   pivot.matrixWorldNeedsUpdate = true;
 }
 setHead({});
+// The scan's neck is bent relative to its head, so it pokes out of the collar. Cut it off just below
+// the chin and let the body's own neck run up into the jaw instead.
+if (Q.get('neck') !== 'keep') {
+  const f = new THREE.Vector3(...SCAN.forward).normalize(), eR = new THREE.Vector3(...SCAN.eyeR), eL = new THREE.Vector3(...SCAN.eyeL);
+  const mid = eR.clone().add(eL).multiplyScalar(0.5), left = eL.clone().sub(eR); left.addScaledVector(f, -left.dot(f)).normalize();
+  const up = new THREE.Vector3().crossVectors(f, left), gap = eR.distanceTo(eL), v = new THREE.Vector3();
+  head.traverse(o => {
+    if (!o.isMesh) return;
+    const P = o.geometry.attributes.position, idx = o.geometry.index.array, h = new Float32Array(P.count);
+    let chin = 0;
+    for (let i = 0; i < P.count; i++) {
+      v.fromBufferAttribute(P, i).sub(mid); h[i] = v.dot(up);
+      if (v.dot(f) > -0.15 * gap && Math.abs(v.dot(left)) < 0.3 * gap) chin = Math.min(chin, h[i]);
+    }
+    const cut = chin - NECK_KEEP * gap, keep = [];
+    for (let i = 0; i < idx.length; i += 3) if (Math.max(h[idx[i]], h[idx[i + 1]], h[idx[i + 2]]) > cut) keep.push(idx[i], idx[i + 1], idx[i + 2]);
+    o.geometry.setIndex(keep);
+    console.log('INFO chin', (chin / gap).toFixed(3));
+  });
+}
 
 // ---- hair: a separate wig shell, placed in bind-pose world units and carried by the head bone
-const wig = new THREE.Group(), WIG = { s: 0.225, sx: 0.9, sz: 1, x: 0.002, y: 0.826, z: 0, pitch: 0 };
+const wig = new THREE.Group(), WIG = { s: 0.226, sx: 0.95, sz: 1, x: 0.002, y: 0.814, z: 0, pitch: 0 };
 function setWig(o) {
   Object.assign(WIG, o);
   const world = new THREE.Matrix4().makeTranslation(WIG.x, WIG.y, WIG.z).multiply(new THREE.Matrix4().makeRotationX(WIG.pitch)).multiply(new THREE.Matrix4().makeScale(WIG.s * WIG.sx, WIG.s, WIG.s * WIG.sz));
