@@ -53,7 +53,7 @@ const SCANS = {
 };
 const SCAN = SCANS[HEAD_SRC];
 // Where the eyes should sit on the rigged body (bind pose, world units) and how far apart.
-const HEAD = { eyeY: 0.905, eyeZ: 0.062, eyeGap: 0.05, pitch: 0, yaw: 0, roll: 0 };
+const HEAD = { eyeY: 0.902, eyeZ: 0.062, eyeGap: 0.046, pitch: 0, yaw: 0, roll: 0 };
 const bindHeadInv = headBone.matrixWorld.clone().invert();
 function setHead(o) {
   Object.assign(HEAD, o);
@@ -74,14 +74,14 @@ function setHead(o) {
 setHead({});
 
 // ---- hair: a separate wig shell, placed in bind-pose world units and carried by the head bone
-const wig = new THREE.Group(), WIG = { s: 0.245, x: 0.002, y: 0.822, z: -0.005, pitch: 0 };
+const wig = new THREE.Group(), WIG = { s: 0.225, sx: 0.9, sz: 1, x: 0.002, y: 0.826, z: 0, pitch: 0 };
 function setWig(o) {
   Object.assign(WIG, o);
-  const world = new THREE.Matrix4().makeTranslation(WIG.x, WIG.y, WIG.z).multiply(new THREE.Matrix4().makeRotationX(WIG.pitch)).multiply(new THREE.Matrix4().makeScale(WIG.s, WIG.s, WIG.s));
+  const world = new THREE.Matrix4().makeTranslation(WIG.x, WIG.y, WIG.z).multiply(new THREE.Matrix4().makeRotationX(WIG.pitch)).multiply(new THREE.Matrix4().makeScale(WIG.s * WIG.sx, WIG.s, WIG.s * WIG.sz));
   wig.matrixAutoUpdate = false; wig.matrix.copy(bindHeadInv.clone().multiply(world)); wig.matrixWorldNeedsUpdate = true;
 }
 if (wigG) {
-  wigG.scene.traverse(o => { if (o.isMesh) o.material = new THREE.MeshStandardMaterial({ color: 0x17151a, roughness: 0.55, side: THREE.DoubleSide }); });
+  wigG.scene.traverse(o => { if (o.isMesh) o.material = new THREE.MeshStandardMaterial({ color: 0x2a2226, roughness: 0.7, side: THREE.DoubleSide }); });
   wig.add(wigG.scene); setWig({}); headBone.add(wig);
 }
 if (Q.get('mode') === 'head') { scene.remove(body); scene.add(pivot); } else if (Q.get('mode') !== 'body') headBone.add(pivot);
