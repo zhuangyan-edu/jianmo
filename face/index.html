@@ -1,0 +1,599 @@
+<title>纯代码头模</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<style>
+/* 布局：整屏 3D 画布，文字和控件贴在左上与底部边缘，不遮挡脸部 */
+:root {
+  color-scheme: dark;
+  --bg-top: #2b3447;
+  --bg-mid: #6f6a72;
+  --bg-low: #d9a577;
+  --ink: #f3ede6;
+  --ink-dim: #c9c2bb;
+  --panel: rgba(22, 26, 36, 0.62);
+  --panel-line: rgba(243, 237, 230, 0.22);
+  --accent: #8fd0ff;
+  --font-ui: "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
+  --font-num: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+html, body { height: 100%; }
+body {
+  background: var(--bg-top);
+  color: var(--ink);
+  font-family: var(--font-ui);
+  overflow: hidden;
+}
+#stage {
+  position: relative;
+  height: 100%;
+  background: linear-gradient(180deg, var(--bg-top) 0%, var(--bg-mid) 62%, var(--bg-low) 100%);
+  touch-action: none;
+  cursor: grab;
+}
+#stage.dragging { cursor: grabbing; }
+#stage.studio { --bg-top: #20242e; --bg-mid: #3a3f4c; --bg-low: #5b5f6b; }
+canvas { display: block; width: 100%; height: 100%; }
+.hud {
+  position: absolute;
+  left: 0; right: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  pointer-events: none;
+}
+.hud.top { top: 0; padding-block: 14px 0; flex-direction: column; gap: 4px; }
+.hud.bottom { bottom: 0; padding-block: 0 16px; align-items: center; }
+h1 { margin: 0; font-size: 17px; font-weight: 600; letter-spacing: 0.04em; text-wrap: balance; }
+.stat { margin: 0; font-size: 12px; color: var(--ink-dim); font-family: var(--font-num); font-variant-numeric: tabular-nums; }
+.hint { margin: 0; font-size: 12px; color: var(--ink-dim); }
+button {
+  pointer-events: auto;
+  font: inherit;
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--panel);
+  border: 1px solid var(--panel-line);
+  border-radius: 999px;
+  padding: 8px 14px;
+  cursor: pointer;
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+}
+button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+#err { color: var(--ink); background: var(--panel); padding: 12px; border-radius: 8px; pointer-events: auto; }
+</style>
+
+<div id="stage">
+  <canvas id="gl" aria-label="可旋转的三维头部模型"></canvas>
+  <div class="hud top">
+    <h1>纯代码头模</h1>
+    <p class="stat" id="stat">正在生成网格…</p>
+    <p class="hint">拖动旋转，滚轮或双指缩放</p>
+    <p id="err" hidden></p>
+  </div>
+  <div class="hud bottom">
+    <button id="btn-light" type="button" aria-pressed="true">原片逆光</button>
+    <button id="btn-glow" type="button" aria-pressed="false">眼睛发光</button>
+    <button id="btn-hair" type="button" aria-pressed="true">显示头发</button>
+    <button id="btn-wire" type="button" aria-pressed="false">显示网格</button>
+    <button id="btn-spin" type="button" aria-pressed="true">自动转动</button>
+  </div>
+</div>
+
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.min.js';
+
+const t0 = performance.now();
+
+// ---------- 小工具 ----------
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+const rnd = mulberry32(20261111);
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const sstep = (a, b, x) => { const t = clamp((x - a) / (b - a), 0, 1); return t * t * (3 - 2 * t); };
+const mix = (a, b, t) => a + (b - a) * t;
+
+// ---------- 距离场积木 ----------
+const smin = (a, b, k) => { const h = Math.max(k - Math.abs(a - b), 0) / k; return Math.min(a, b) - h * h * k * 0.25; };
+const smax = (a, b, k) => -smin(-a, -b, k);
+function ell(x, y, z, cx, cy, cz, rx, ry, rz) {
+  const px = (x - cx) / rx, py = (y - cy) / ry, pz = (z - cz) / rz;
+  const k0 = Math.hypot(px, py, pz);
+  if (k0 < 1e-6) return -Math.min(rx, ry, rz);
+  const k1 = Math.hypot(px / rx, py / ry, pz / rz);
+  return k0 * (k0 - 1) / k1;
+}
+function cap(x, y, z, ax, ay, az, bx, by, bz, r) {
+  const pax = x - ax, pay = y - ay, paz = z - az;
+  const bax = bx - ax, bay = by - ay, baz = bz - az;
+  const h = clamp((pax * bax + pay * bay + paz * baz) / (bax * bax + bay * bay + baz * baz), 0, 1);
+  return Math.hypot(pax - bax * h, pay - bay * h, paz - baz * h) - r;
+}
+
+// 头骨（供头发贴附用，不含鼻子耳朵）
+function skull(x, y, z) {
+  x = Math.abs(x);
+  let d = ell(x, y, z, 0, 0.13, -0.08, 0.90, 0.86, 0.98);
+  d = smin(d, ell(x, y, z, 0, -0.38, 0.18, 0.70, 0.74, 0.72), 0.30);
+  return d;
+}
+function torso(x, y, z) {
+  x = Math.abs(x);
+  let d = cap(x, y, z, 0, -0.75, -0.12, 0, -1.95, -0.30, 0.30);
+  d = smin(d, cap(x, y, z, 0, -2.02, -0.30, 1.02, -2.18, -0.32, 0.36), 0.32);
+  d = smin(d, ell(x, y, z, 0, -2.75, -0.22, 1.05, 0.85, 0.56), 0.30);
+  return d;
+}
+// 完整头部
+function head(x, y, z) {
+  const sx = x;
+  x = Math.abs(x);
+  let d = skull(sx, y, z);
+  d = smin(d, ell(x, y, z, 0, -0.99, 0.55, 0.17, 0.14, 0.17), 0.30);          // 下巴
+  d = smin(d, ell(x, y, z, 0.44, -0.66, 0.05, 0.18, 0.20, 0.22), 0.28);        // 下颌角
+  d = smin(d, ell(x, y, z, 0.34, -0.42, 0.57, 0.24, 0.25, 0.23), 0.24);        // 脸颊
+  d = smax(d, -ell(x, y, z, 0.38, -0.17, 1.01, 0.29, 0.21, 0.14), 0.12);       // 眼窝
+  d = smin(d, cap(x, y, z, 0, -0.10, 0.865, 0, -0.40, 0.955, 0.042), 0.11);    // 鼻梁
+  d = smin(d, ell(x, y, z, 0, -0.425, 0.975, 0.052, 0.050, 0.060), 0.07);      // 鼻尖
+  d = smin(d, ell(x, y, z, 0, -0.705, 0.815, 0.11, 0.030, 0.050), 0.06);       // 上唇
+  d = smin(d, ell(x, y, z, 0, -0.765, 0.800, 0.085, 0.032, 0.050), 0.06);      // 下唇
+  d = smin(d, ell(x, y, z, 0.90, -0.20, -0.04, 0.065, 0.20, 0.13), 0.05);      // 耳朵
+  d = smin(d, torso(sx, y, z), 0.14);
+  return Math.max(d, -2.80 - y);
+}
+// 衬衫：在躯干外面套一层，V 领
+function shirt(x, y, z) {
+  const ax = Math.abs(x);
+  const vdip = z > -0.1 ? 0.55 * Math.max(0, 0.40 - ax) : 0;
+  const neckline = -1.42 - vdip + 0.06 * sstep(0.2, 0.6, ax);
+  const rim = sstep(0.30, 0.0, neckline - y);
+  let d = torso(x, y, z) - 0.05 - 0.07 * rim;
+  d = smax(d, y - neckline, 0.04);
+  return Math.max(d, -2.80 - y);
+}
+function grad(f, x, y, z, e = 0.004) {
+  const gx = f(x + e, y, z) - f(x - e, y, z);
+  const gy = f(x, y + e, z) - f(x, y - e, z);
+  const gz = f(x, y, z + e) - f(x, y, z - e);
+  const l = Math.hypot(gx, gy, gz) || 1;
+  return [gx / l, gy / l, gz / l];
+}
+
+// ---------- 距离场转网格（surface nets） ----------
+function surfaceNets(f, mn, mx, h) {
+  const nx = Math.ceil((mx[0] - mn[0]) / h) + 1, ny = Math.ceil((mx[1] - mn[1]) / h) + 1, nz = Math.ceil((mx[2] - mn[2]) / h) + 1;
+  const val = new Float32Array(nx * ny * nz);
+  for (let k = 0, n = 0; k < nz; k++) for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++, n++)
+    val[n] = f(mn[0] + i * h, mn[1] + j * h, mn[2] + k * h);
+  const cx = nx - 1, cy = ny - 1;
+  const cell = new Int32Array(cx * cy * (nz - 1)).fill(-1);
+  const pos = [];
+  const EDGES = [[0,1],[2,3],[4,5],[6,7],[0,2],[1,3],[4,6],[5,7],[0,4],[1,5],[2,6],[3,7]];
+  const cv = new Float32Array(8);
+  for (let k = 0; k < nz - 1; k++) for (let j = 0; j < ny - 1; j++) for (let i = 0; i < nx - 1; i++) {
+    let mask = 0;
+    for (let c = 0; c < 8; c++) {
+      const v = val[(i + (c & 1)) + nx * ((j + (c >> 1 & 1)) + ny * (k + (c >> 2 & 1)))];
+      cv[c] = v; if (v < 0) mask |= 1 << c;
+    }
+    if (mask === 0 || mask === 255) continue;
+    let sx = 0, sy = 0, sz = 0, cnt = 0;
+    for (const [a, b] of EDGES) {
+      if ((cv[a] < 0) === (cv[b] < 0)) continue;
+      const t = cv[a] / (cv[a] - cv[b]);
+      sx += mix(a & 1, b & 1, t); sy += mix(a >> 1 & 1, b >> 1 & 1, t); sz += mix(a >> 2 & 1, b >> 2 & 1, t); cnt++;
+    }
+    cell[i + cx * (j + cy * k)] = pos.length / 3;
+    pos.push(mn[0] + (i + sx / cnt) * h, mn[1] + (j + sy / cnt) * h, mn[2] + (k + sz / cnt) * h);
+  }
+  // 顶点吸附到真实表面，法线取梯度
+  const nor = new Float32Array(pos.length);
+  for (let v = 0; v < pos.length; v += 3) {
+    for (let it = 0; it < 2; it++) {
+      const g = grad(f, pos[v], pos[v + 1], pos[v + 2]);
+      const d = f(pos[v], pos[v + 1], pos[v + 2]);
+      pos[v] -= g[0] * d * 0.9; pos[v + 1] -= g[1] * d * 0.9; pos[v + 2] -= g[2] * d * 0.9;
+    }
+    const g = grad(f, pos[v], pos[v + 1], pos[v + 2]);
+    nor[v] = g[0]; nor[v + 1] = g[1]; nor[v + 2] = g[2];
+  }
+  const idx = [];
+  const C = (i, j, k) => cell[i + cx * (j + cy * k)];
+  function quad(a, b, c, d) {
+    if (a < 0 || b < 0 || c < 0 || d < 0) return;
+    tri(a, b, c); tri(a, c, d);
+  }
+  function tri(a, b, c) {
+    const ax = pos[a * 3], ay = pos[a * 3 + 1], az = pos[a * 3 + 2];
+    const ux = pos[b * 3] - ax, uy = pos[b * 3 + 1] - ay, uz = pos[b * 3 + 2] - az;
+    const vx = pos[c * 3] - ax, vy = pos[c * 3 + 1] - ay, vz = pos[c * 3 + 2] - az;
+    const fx = uy * vz - uz * vy, fy = uz * vx - ux * vz, fz = ux * vy - uy * vx;
+    const s = fx * (nor[a * 3] + nor[b * 3] + nor[c * 3]) + fy * (nor[a * 3 + 1] + nor[b * 3 + 1] + nor[c * 3 + 1]) + fz * (nor[a * 3 + 2] + nor[b * 3 + 2] + nor[c * 3 + 2]);
+    if (s >= 0) idx.push(a, b, c); else idx.push(a, c, b);
+  }
+  const V = (i, j, k) => val[i + nx * (j + ny * k)];
+  for (let k = 1; k < nz - 1; k++) for (let j = 1; j < ny - 1; j++) for (let i = 1; i < nx - 1; i++) {
+    const v0 = V(i, j, k) < 0;
+    if (v0 !== (V(i + 1, j, k) < 0)) quad(C(i, j - 1, k - 1), C(i, j, k - 1), C(i, j, k), C(i, j - 1, k));
+    if (v0 !== (V(i, j + 1, k) < 0)) quad(C(i - 1, j, k - 1), C(i, j, k - 1), C(i, j, k), C(i - 1, j, k));
+    if (v0 !== (V(i, j, k + 1) < 0)) quad(C(i - 1, j - 1, k), C(i, j - 1, k), C(i, j, k), C(i - 1, j, k));
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
+  g.setIndex(idx);
+  return g;
+}
+
+// ---------- 五官贴图（canvas 手绘） ----------
+const FACE_W = 1.6, FACE_Y0 = -1.25;
+function drawFace(S, glowOnly) {
+  const c = document.createElement('canvas'); c.width = c.height = S;
+  const g = c.getContext('2d');
+  const U = S / FACE_W;
+  const Y = y => (1 - (y - FACE_Y0) / FACE_W) * S;
+  const X = x => x * U;
+  if (glowOnly) { g.fillStyle = '#000'; g.fillRect(0, 0, S, S); }
+  for (const side of [1, -1]) {
+    g.save(); g.translate(S / 2, 0); g.scale(side, 1);
+    g.translate(X(0.375), Y(-0.15)); g.scale(1.3, 1.3); g.translate(-X(0.375), -Y(-0.15)); g.translate(X(0.012), X(0.03));
+    const eyePath = () => {
+      g.beginPath();
+      g.moveTo(X(0.195), Y(-0.175));
+      g.bezierCurveTo(X(0.26), Y(-0.045), X(0.47), Y(-0.030), X(0.555), Y(-0.125));
+      g.bezierCurveTo(X(0.50), Y(-0.262), X(0.29), Y(-0.262), X(0.195), Y(-0.175));
+      g.closePath();
+    };
+    const ix = 0.372, iy = -0.150, irx = 0.088, iry = 0.108;
+    if (glowOnly) {
+      g.save(); eyePath(); g.clip();
+      const rg = g.createRadialGradient(X(ix), Y(iy), 0, X(ix), Y(iy), X(iry));
+      rg.addColorStop(0, '#ffffff'); rg.addColorStop(0.55, '#9fd6ff'); rg.addColorStop(1, '#1d5fa8');
+      g.fillStyle = rg; g.beginPath(); g.ellipse(X(ix), Y(iy), X(irx), X(iry), 0, 0, 7); g.fill();
+      g.restore(); g.restore(); continue;
+    }
+    // 腮红
+    const bl = g.createRadialGradient(X(0.42), Y(-0.40), 0, X(0.42), Y(-0.40), X(0.22));
+    bl.addColorStop(0, 'rgba(236,120,110,0.26)'); bl.addColorStop(1, 'rgba(236,120,110,0)');
+    g.fillStyle = bl; g.fillRect(X(0.1), Y(-0.1), X(0.7), X(0.7));
+    // 眼白
+    g.save(); eyePath(); g.clip();
+    const wg = g.createLinearGradient(0, Y(-0.03), 0, Y(-0.26));
+    wg.addColorStop(0, '#9aa3b4'); wg.addColorStop(0.35, '#e6eaf0'); wg.addColorStop(1, '#f4f1ee');
+    g.fillStyle = wg; g.fillRect(X(0.1), Y(0), X(0.6), X(0.4));
+    // 虹膜
+    const ig = g.createLinearGradient(0, Y(iy + iry), 0, Y(iy - iry));
+    ig.addColorStop(0, '#141b28'); ig.addColorStop(0.45, '#33506e'); ig.addColorStop(1, '#8fb9d8');
+    g.fillStyle = ig; g.beginPath(); g.ellipse(X(ix), Y(iy), X(irx), X(iry), 0, 0, 7); g.fill();
+    g.lineWidth = X(0.012); g.strokeStyle = '#10141d'; g.stroke();
+    g.fillStyle = '#0a0c12'; g.beginPath(); g.ellipse(X(ix), Y(iy + 0.01), X(0.036), X(0.052), 0, 0, 7); g.fill();
+    g.fillStyle = 'rgba(170,215,240,0.55)'; g.beginPath(); g.ellipse(X(ix), Y(iy - 0.07), X(0.05), X(0.022), 0, 0, 7); g.fill();
+    g.fillStyle = '#fff';
+    g.beginPath(); g.ellipse(X(ix - 0.036 * side), Y(iy + 0.052), X(0.022), X(0.026), 0, 0, 7); g.fill();
+    g.beginPath(); g.arc(X(ix + 0.034 * side), Y(iy - 0.046), X(0.010), 0, 7); g.fill();
+    g.restore();
+    // 上睫毛
+    g.lineCap = 'round'; g.lineJoin = 'round';
+    g.strokeStyle = '#17131a'; g.lineWidth = X(0.030);
+    g.beginPath(); g.moveTo(X(0.20), Y(-0.165));
+    g.bezierCurveTo(X(0.26), Y(-0.040), X(0.47), Y(-0.025), X(0.560), Y(-0.118)); g.stroke();
+    g.lineWidth = X(0.016);
+    g.beginPath(); g.moveTo(X(0.535), Y(-0.095)); g.quadraticCurveTo(X(0.585), Y(-0.105), X(0.612), Y(-0.070)); g.stroke();
+    // 下眼睑
+    g.strokeStyle = 'rgba(70,40,44,0.55)'; g.lineWidth = X(0.007);
+    g.beginPath(); g.moveTo(X(0.545), Y(-0.150)); g.quadraticCurveTo(X(0.47), Y(-0.262), X(0.36), Y(-0.258)); g.stroke();
+    // 双眼皮
+    g.strokeStyle = 'rgba(150,80,72,0.45)'; g.lineWidth = X(0.006);
+    g.beginPath(); g.moveTo(X(0.25), Y(-0.045)); g.quadraticCurveTo(X(0.38), Y(0.022), X(0.52), Y(-0.040)); g.stroke();
+    // 眉毛
+    g.strokeStyle = 'rgba(34,30,40,0.85)'; g.lineWidth = X(0.015);
+    g.beginPath(); g.moveTo(X(0.185), Y(0.045)); g.quadraticCurveTo(X(0.37), Y(0.105), X(0.555), Y(0.065)); g.stroke();
+    g.restore();
+  }
+  if (!glowOnly) {
+    const cx = S / 2;
+    g.lineCap = 'round';
+    g.strokeStyle = 'rgba(170,84,76,0.55)'; g.lineWidth = X(0.008);
+    g.beginPath(); g.moveTo(cx - X(0.022), Y(-0.468)); g.quadraticCurveTo(cx, Y(-0.480), cx + X(0.022), Y(-0.468)); g.stroke();
+    g.fillStyle = 'rgba(205,105,105,0.34)';
+    g.beginPath(); g.ellipse(cx, Y(-0.766), X(0.060), X(0.022), 0, 0, 7); g.fill();
+    g.strokeStyle = '#6f3238'; g.lineWidth = X(0.009);
+    g.beginPath(); g.moveTo(cx - X(0.088), Y(-0.728)); g.quadraticCurveTo(cx, Y(-0.742), cx + X(0.088), Y(-0.728)); g.stroke();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.colorSpace = glowOnly ? THREE.NoColorSpace : THREE.SRGBColorSpace;
+  t.anisotropy = 8;
+  return t;
+}
+
+// ---------- 着色器 ----------
+const light = {
+  uKeyDir: { value: new THREE.Vector3() }, uKeyCol: { value: new THREE.Color() },
+  uSky: { value: new THREE.Color() }, uGround: { value: new THREE.Color() },
+  uRimDir: { value: new THREE.Vector3() }, uRimCol: { value: new THREE.Color() },
+};
+const VERT = `
+attribute vec3 aTan; attribute vec2 aInfo;
+varying vec3 vP; varying vec3 vN; varying vec3 vT; varying vec2 vI;
+void main(){ vP = position; vN = normal; vT = aTan; vI = aInfo;
+  gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`;
+const COMMON = `
+uniform vec3 uKeyDir, uKeyCol, uSky, uGround, uRimDir, uRimCol;
+varying vec3 vP; varying vec3 vN; varying vec3 vT; varying vec2 vI;
+vec3 s2l(vec3 c){ return pow(c, vec3(2.2)); }`;
+const skinFrag = `${COMMON}
+uniform sampler2D uFace, uGlowTex; uniform float uGlow, uCloth, uBald;
+void main(){
+  vec3 n = normalize(vN); vec3 v = normalize(cameraPosition - vP);
+  float ndl = dot(n, uKeyDir);
+  float lit = smoothstep(-0.06, 0.34, ndl);
+  vec3 amb = mix(uGround, uSky, n.y * 0.5 + 0.5);
+  vec3 alb = mix(s2l(vec3(0.99, 0.83, 0.75)), s2l(vec3(0.95, 0.95, 0.97)), uCloth);
+  // 发际线以内压成头皮的深色
+  float hl = mix(-0.55, 0.50, smoothstep(-0.05, 0.50, vP.z));
+  float scalp = smoothstep(hl - 0.03, hl + 0.05, vP.y) * (1.0 - uCloth) * (1.0 - uBald);
+  alb = mix(alb, s2l(vec3(0.07, 0.07, 0.10)), scalp);
+  vec2 uv = vec2(vP.x / 1.6 + 0.5, (vP.y + 1.25) / 1.6);
+  float fm = smoothstep(0.10, 0.40, n.z) * step(0.0, vP.z) * (1.0 - uCloth)
+           * step(0.0, uv.x) * step(uv.x, 1.0) * step(0.0, uv.y) * step(uv.y, 1.0);
+  vec4 ft = texture2D(uFace, uv); float fa = ft.a * fm;
+  alb = mix(alb, ft.rgb, fa);
+  vec3 L = amb + uKeyCol * lit;
+  L = mix(L, vec3(dot(L, vec3(0.333))) * 1.05 + 0.08, fa * 0.45);
+  vec3 col = alb * L;
+  // 明暗交界处的透光红晕
+  float band = smoothstep(-0.45, 0.05, ndl) * (1.0 - lit);
+  col += alb * vec3(0.55, 0.12, 0.07) * band * dot(uKeyCol, vec3(0.333)) * (1.0 - uCloth) * (1.0 - scalp);
+  float fr = pow(1.0 - max(dot(n, v), 0.0), 2.6);
+  col += uRimCol * fr * smoothstep(-0.25, 0.55, dot(n, uRimDir)) * mix(0.9, 0.55, uCloth);
+  float gm = texture2D(uGlowTex, uv).r * fm;
+  col += vec3(0.45, 0.80, 1.35) * gm * uGlow * 1.6;
+  gl_FragColor = vec4(col, 1.0);
+  #include <colorspace_fragment>
+}`;
+const hairFrag = `${COMMON}
+void main(){
+  vec3 n = normalize(vN); vec3 t = normalize(vT); vec3 v = normalize(cameraPosition - vP);
+  float tt = vI.x, r = vI.y;
+  vec3 base = mix(s2l(vec3(0.085, 0.09, 0.13)), s2l(vec3(0.15, 0.155, 0.21)), tt * tt) * (0.7 + 0.6 * r);
+  float ndl = dot(n, uKeyDir);
+  float lit = smoothstep(-0.35, 0.65, ndl);
+  vec3 amb = mix(uGround, uSky, n.y * 0.5 + 0.5);
+  vec3 col = base * (amb * 1.1 + uKeyCol * lit * 0.32);
+  vec3 h = normalize(uKeyDir + v);
+  float th = dot(normalize(t + n * (r - 0.5) * 0.25), h);
+  float sn = sqrt(max(1.0 - th * th, 0.0));
+  col += uKeyCol * (pow(sn, 120.0) * 0.16 + pow(sn, 20.0) * 0.02) * smoothstep(-0.2, 0.3, ndl);
+  vec3 h2 = normalize(vec3(0.0, 1.0, 0.25) + v);
+  float th2 = dot(t, h2);
+  col += uSky * pow(sqrt(max(1.0 - th2 * th2, 0.0)), 60.0) * 0.12;
+  float fr = pow(1.0 - abs(dot(n, v)), 3.0);
+  col += uRimCol * fr * smoothstep(-0.1, 0.7, dot(n, uRimDir)) * (0.25 + tt * 0.5);
+  gl_FragColor = vec4(col, 1.0);
+  #include <colorspace_fragment>
+}`;
+
+// ---------- 头发：一束一束沿头皮流下来 ----------
+function buildHair() {
+  const P = [], N = [], T = [], I = [], idx = [];
+  const crown = [0.05, 1.08, -0.30];
+  const wind = [-0.55, 0.10, -0.75];
+  const hairMask = (x, y, z) => y > mix(-0.55, 0.50, sstep(-0.05, 0.50, z)) + 0.04;
+  function strand(root, W, lift, flyaway) {
+    const n0 = grad(skull, root[0], root[1], root[2]);
+    let d0 = [root[0] - crown[0], root[1] - crown[1], root[2] - crown[2]];
+    const dn = d0[0] * n0[0] + d0[1] * n0[1] + d0[2] * n0[2];
+    d0 = [d0[0] - n0[0] * dn, d0[1] - n0[1] * dn, d0[2] - n0[2] * dn];
+    let l = Math.hypot(d0[0], d0[1], d0[2]);
+    d0 = l < 1e-3 ? [0, 0, 1] : [d0[0] / l, d0[1] / l, d0[2] / l];
+    const sway = (rnd() - 0.5) * 0.05, jr = rnd(), wr = 0.3 + rnd() * 0.9;
+    const step = 0.065;
+    const yEndAt = q => mix(-0.80 - jr * 0.30, mix(0.13 - jr * 0.24, -0.03 - jr * 0.24, sstep(0.20, 0.10, Math.abs(q[0]))), sstep(0.18, 0.50, q[2])) - (flyaway ? 0.12 : 0);
+    function sim(flickAt) {
+      const pts = [root.slice()];
+      let p = root.slice(), n = n0, d = d0;
+      for (let s = 0; s < 40; s++) {
+        const side = [d[1] * n[2] - d[2] * n[1], d[2] * n[0] - d[0] * n[2], d[0] * n[1] - d[1] * n[0]];
+        const fl = sstep(flickAt, flickAt + 6, s) * (flyaway ? 1.8 : 1.0);
+        const wf = 0.03 * wr + fl * 0.10 * wr;
+        d = [
+          d[0] + side[0] * sway + wind[0] * wf + n[0] * fl * 0.07,
+          d[1] - 0.22 + side[1] * sway + wind[1] * wf + n[1] * fl * 0.07 + fl * 0.10,
+          d[2] + side[2] * sway + wind[2] * wf + n[2] * fl * 0.07,
+        ];
+        l = Math.hypot(d[0], d[1], d[2]); d = [d[0] / l, d[1] / l, d[2] / l];
+        const q = [p[0] + d[0] * step, p[1] + d[1] * step, p[2] + d[2] * step];
+        const off = 0.022 + lift * 0.055 + 0.035 * Math.min(s / 12, 1);
+        const dist = Math.min(skull(q[0], q[1], q[2]), torso(q[0], q[1], q[2]) + 0.02);
+        n = grad(skull, q[0], q[1], q[2]);
+        if (dist < off) { q[0] += n[0] * (off - dist); q[1] += n[1] * (off - dist); q[2] += n[2] * (off - dist); }
+        d = [q[0] - p[0], q[1] - p[1], q[2] - p[2]];
+        l = Math.hypot(d[0], d[1], d[2]) || 1; d = [d[0] / l, d[1] / l, d[2] / l];
+        p = q; pts.push(q.slice());
+        if (q[1] < yEndAt(q) && s > 3) break;
+      }
+      return pts;
+    }
+    const pts = sim(Math.max(sim(99).length * 0.62, 3));
+    // 生成菱形截面的发束
+    const m = pts.length, shade = rnd(), base = P.length / 3;
+    for (let i = 0; i < m; i++) {
+      const t = i / (m - 1);
+      const a = pts[Math.max(i - 1, 0)], b = pts[Math.min(i + 1, m - 1)], c = pts[i];
+      let tx = b[0] - a[0], ty = b[1] - a[1], tz = b[2] - a[2];
+      l = Math.hypot(tx, ty, tz) || 1; tx /= l; ty /= l; tz /= l;
+      let nn = grad(skull, c[0], c[1], c[2]);
+      const dt = nn[0] * tx + nn[1] * ty + nn[2] * tz;
+      let ux = nn[0] - tx * dt, uy = nn[1] - ty * dt, uz = nn[2] - tz * dt;
+      l = Math.hypot(ux, uy, uz) || 1; ux /= l; uy /= l; uz /= l;
+      const sx = ty * uz - tz * uy, sy = tz * ux - tx * uz, sz = tx * uy - ty * ux;
+      const w = W * (0.50 + 0.50 * Math.sin(Math.min(t / 0.35, 1) * Math.PI / 2)) * (1 - Math.pow(t, 2.4));
+      const th = w * 0.30;
+      const ring = [[-w, 0, -0.45, 0.8], [0, th, 0, 1], [w, 0, 0.45, 0.8], [0, -th * 0.5, 0, -1]];
+      for (const [a1, b1, ns, nu] of ring) {
+        P.push(c[0] + sx * a1 + ux * b1, c[1] + sy * a1 + uy * b1, c[2] + sz * a1 + uz * b1);
+        let nx = sx * ns + ux * nu, ny = sy * ns + uy * nu, nz = sz * ns + uz * nu;
+        l = Math.hypot(nx, ny, nz); N.push(nx / l, ny / l, nz / l);
+        T.push(tx, ty, tz); I.push(t, shade);
+      }
+      if (i < m - 1) for (let k = 0; k < 4; k++) {
+        const a0 = base + i * 4 + k, a1 = base + i * 4 + (k + 1) % 4, b0 = a0 + 4, b1 = a1 + 4;
+        idx.push(a0, b0, a1, a1, b0, b1);
+      }
+    }
+  }
+  const NR = 620, c0 = [0, 0.15, -0.05];
+  for (let i = 0; i < NR; i++) {
+    const y = 1 - (i + 0.5) / NR * 1.6;
+    const r = Math.sqrt(Math.max(1 - y * y, 0)), ph = i * 2.399963 + rnd() * 0.3;
+    const u = [Math.cos(ph) * r, y, Math.sin(ph) * r];
+    let p = [c0[0] + u[0] * 1.7, c0[1] + u[1] * 1.7, c0[2] + u[2] * 1.7];
+    for (let s = 0; s < 24; s++) { const d = skull(p[0], p[1], p[2]); p = [p[0] - u[0] * d, p[1] - u[1] * d, p[2] - u[2] * d]; }
+    if (!hairMask(p[0], p[1], p[2])) continue;
+    const fly = rnd() < 0.10;
+    strand(p, fly ? 0.014 + rnd() * 0.012 : 0.10 + rnd() * 0.11, fly ? 1.2 + rnd() * 0.8 : rnd(), fly);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(P, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(N, 3));
+  g.setAttribute('aTan', new THREE.Float32BufferAttribute(T, 3));
+  g.setAttribute('aInfo', new THREE.Float32BufferAttribute(I, 2));
+  g.setIndex(idx);
+  return g;
+}
+
+// ---------- 场景 ----------
+const stage = document.getElementById('stage');
+const canvas = document.getElementById('gl');
+let renderer;
+try {
+  renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true });
+} catch (e) {
+  const el = document.getElementById('err');
+  el.textContent = '这个浏览器没有开启 WebGL，无法显示模型。请换一个浏览器或设备再打开。';
+  el.hidden = false;
+  throw e;
+}
+renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(26, 1, 0.1, 100);
+
+const headGeo = surfaceNets(head, [-1.75, -2.86, -1.25], [1.75, 1.22, 1.22], 0.027);
+const shirtGeo = surfaceNets(shirt, [-1.75, -2.86, -1.15], [1.75, -1.1, 0.8], 0.03);
+const hairGeo = buildHair();
+
+const faceTex = drawFace(1024, false), glowTex = drawFace(512, true);
+const skinU = { ...light, uFace: { value: faceTex }, uGlowTex: { value: glowTex }, uGlow: { value: 0 }, uCloth: { value: 0 }, uBald: { value: 0 } };
+const skinMat = new THREE.ShaderMaterial({ vertexShader: VERT, fragmentShader: skinFrag, uniforms: skinU });
+const shirtMat = new THREE.ShaderMaterial({ vertexShader: VERT, fragmentShader: skinFrag, uniforms: { ...skinU, uCloth: { value: 1 } } });
+const hairMat = new THREE.ShaderMaterial({ vertexShader: VERT, fragmentShader: hairFrag, uniforms: light });
+const mats = [skinMat, shirtMat, hairMat];
+const hairMesh = new THREE.Mesh(hairGeo, hairMat);
+scene.add(new THREE.Mesh(headGeo, skinMat), new THREE.Mesh(shirtGeo, shirtMat), hairMesh);
+
+const tris = (headGeo.index.count + shirtGeo.index.count + hairGeo.index.count) / 3;
+document.getElementById('stat').textContent =
+  `${Math.round(tris).toLocaleString('en-US')} 个三角面 · 生成用时 ${Math.round(performance.now() - t0)} ms · 没有外部模型和贴图`;
+
+// ---------- 灯光预设 ----------
+function setLight(backlit) {
+  if (backlit) {
+    light.uKeyDir.value.set(0.70, 0.42, -0.45).normalize();
+    light.uKeyCol.value.setRGB(1.25, 0.92, 0.62);
+    light.uSky.value.setRGB(0.50, 0.57, 0.72);
+    light.uGround.value.setRGB(0.42, 0.36, 0.36);
+    light.uRimDir.value.set(0.70, 0.42, -0.45).normalize();
+    light.uRimCol.value.setRGB(1.5, 1.0, 0.6);
+  } else {
+    light.uKeyDir.value.set(0.42, 0.50, 0.76).normalize();
+    light.uKeyCol.value.setRGB(0.78, 0.74, 0.70);
+    light.uSky.value.setRGB(0.36, 0.39, 0.46);
+    light.uGround.value.setRGB(0.30, 0.26, 0.26);
+    light.uRimDir.value.set(-0.65, 0.30, -0.60).normalize();
+    light.uRimCol.value.setRGB(0.45, 0.60, 0.85);
+  }
+  stage.classList.toggle('studio', !backlit);
+}
+
+// ---------- 视角控制 ----------
+const view = { th: 0.45, ph: 0.06, r: 9.0, tgt: new THREE.Vector3(0, -0.42, 0) };
+const state = { backlit: true, glow: false, wire: false, hair: true, spin: !matchMedia('(prefers-reduced-motion: reduce)').matches };
+function place() {
+  const cp = Math.cos(view.ph);
+  camera.position.set(view.tgt.x + view.r * Math.sin(view.th) * cp, view.tgt.y + view.r * Math.sin(view.ph), view.tgt.z + view.r * Math.cos(view.th) * cp);
+  camera.lookAt(view.tgt);
+}
+const ptrs = new Map(); let pinch = 0;
+stage.addEventListener('pointerdown', e => {
+  if (e.target.closest('button')) return;
+  ptrs.set(e.pointerId, [e.clientX, e.clientY]); stage.setPointerCapture(e.pointerId);
+  stage.classList.add('dragging'); stopSpin();
+});
+stage.addEventListener('pointermove', e => {
+  const p = ptrs.get(e.pointerId); if (!p) return;
+  if (ptrs.size === 1) {
+    view.th -= (e.clientX - p[0]) * 0.008;
+    view.ph = clamp(view.ph + (e.clientY - p[1]) * 0.006, -1.2, 1.3);
+  }
+  ptrs.set(e.pointerId, [e.clientX, e.clientY]);
+  if (ptrs.size === 2) {
+    const [a, b] = [...ptrs.values()], d = Math.hypot(a[0] - b[0], a[1] - b[1]);
+    if (pinch) view.r = clamp(view.r * pinch / d, 3.5, 20);
+    pinch = d;
+  }
+});
+const up = e => { ptrs.delete(e.pointerId); pinch = 0; if (!ptrs.size) stage.classList.remove('dragging'); };
+stage.addEventListener('pointerup', up); stage.addEventListener('pointercancel', up);
+stage.addEventListener('wheel', e => { e.preventDefault(); view.r = clamp(view.r * Math.exp(e.deltaY * 0.001), 3.5, 20); }, { passive: false });
+
+const $ = id => document.getElementById(id);
+function sync() {
+  $('btn-light').setAttribute('aria-pressed', state.backlit);
+  $('btn-glow').setAttribute('aria-pressed', state.glow);
+  $('btn-wire').setAttribute('aria-pressed', state.wire);
+  $('btn-hair').setAttribute('aria-pressed', state.hair);
+  hairMesh.visible = state.hair; skinU.uBald.value = state.hair ? 0 : 1;
+  $('btn-spin').setAttribute('aria-pressed', state.spin);
+  setLight(state.backlit);
+  mats.forEach(m => { m.wireframe = state.wire; });
+}
+function stopSpin() { if (state.spin) { state.spin = false; sync(); } }
+$('btn-light').onclick = () => { state.backlit = !state.backlit; sync(); };
+$('btn-glow').onclick = () => { state.glow = !state.glow; sync(); };
+$('btn-hair').onclick = () => { state.hair = !state.hair; sync(); };
+$('btn-wire').onclick = () => { state.wire = !state.wire; sync(); };
+$('btn-spin').onclick = () => { state.spin = !state.spin; spinT = Math.asin(clamp(view.th / 1.05, -1, 1)); sync(); };
+sync();
+
+function resize() {
+  const w = stage.clientWidth, h = stage.clientHeight;
+  renderer.setSize(w, h, false);
+  camera.aspect = w / h;
+  // 竖屏时拉远，保证整个头都在画面里
+  camera.fov = w < h ? 26 * clamp(h / w, 1, 1.9) * 0.82 : 26;
+  camera.updateProjectionMatrix();
+}
+addEventListener('resize', resize); resize();
+
+let spinT = Math.asin(view.th / 1.05), last = performance.now(), glow = 0;
+function frame(now) {
+  const dt = Math.min((now - last) / 1000, 0.05); last = now;
+  if (state.spin) { spinT += dt * 0.45; view.th = Math.sin(spinT) * 1.05; }
+  glow += ((state.glow ? 1 : 0) - glow) * Math.min(dt * 6, 1);
+  skinU.uGlow.value = glow * (0.85 + 0.15 * Math.sin(now * 0.006));
+  place();
+  renderer.render(scene, camera);
+  requestAnimationFrame(frame);
+}
+// 给截图脚本用的钩子
+window.__view = (th, ph, r, opts = {}) => { state.spin = false; Object.assign(state, opts); view.th = th; view.ph = ph; if (r) view.r = r; sync(); place(); glow = state.glow ? 1 : 0; skinU.uGlow.value = glow; renderer.render(scene, camera); };
+requestAnimationFrame(frame);
+</script>
