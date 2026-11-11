@@ -24,9 +24,9 @@ scene.add(new THREE.HemisphereLight(0xffffff, 0x555555, 2.2));
 const sun = new THREE.DirectionalLight(0xffffff, 2); sun.position.set(1, 2, 3); scene.add(sun);
 
 const load = url => new Promise((ok, bad) => new GLTFLoader().load(url, ok, undefined, bad));
-// head=bald (default): clean bald scan + separate wig.  head=head: scan with fused hair (kept for comparison).
-// hair=code (default): procedural hair grown on the bald scan.  hair=wig: the wig model.
-const HEAD_SRC = Q.get('head') || 'bald', HAIR = Q.get('hair') || 'code', useWig = HEAD_SRC === 'bald' && HAIR === 'wig';
+// head=head (default): the scan with its own messy hair, used as is.  head=bald: clean bald scan (kept for comparison),
+// with hair=code (procedural hair grown on it) or hair=wig (the wig model).
+const HEAD_SRC = Q.get('head') || 'head', HAIR = Q.get('hair') || 'code', useWig = HEAD_SRC === 'bald' && HAIR === 'wig';
 const [bodyG, headG, wigG] = await Promise.all([load('../assets/body.glb'), load(`../assets/${HEAD_SRC}.glb`), useWig ? load('../assets/wig.glb') : null]);
 
 // ---- body: drop the low-detail head and hair, keep everything below the neck
@@ -115,6 +115,19 @@ function setHead(o) {
   pivot.matrixWorldNeedsUpdate = true;
 }
 setHead({});
+// The scan was exported with the head turned, bowed and leaning. That pose is the one we want, so give it
+// back through the neck and head bones (tilt=0 keeps the head upright; values between scale the pose).
+const TILT = +(Q.get('tilt') ?? 1);
+if (TILT && Q.get('mode') !== 'head') {
+  const f = new THREE.Vector3(...SCAN.forward).normalize(), left = new THREE.Vector3(...SCAN.eyeL).sub(new THREE.Vector3(...SCAN.eyeR));
+  left.addScaledVector(f, -left.dot(f)).normalize();
+  const pose = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(left, new THREE.Vector3().crossVectors(f, left), f));
+  const turn = (b, t) => {                       // rotate a bone by a share of the pose, measured in world axes
+    const W = new THREE.Quaternion().slerp(pose, t), P = b.parent.getWorldQuaternion(new THREE.Quaternion());
+    b.quaternion.premultiply(P.clone().invert().multiply(W).multiply(P)); b.updateMatrixWorld(true);
+  };
+  turn(bone('Neck'), 0.4 * TILT); turn(headBone, 0.6 * TILT);
+}
 // The scan's neck is bent relative to its head, so it pokes out of the collar. Cut it off just below
 // the chin and let the body's own neck run up into the jaw instead.
 if (Q.get('neck') !== 'keep') {

@@ -9,7 +9,7 @@ const html=`<!doctype html><body style="margin:0;background:#888"><canvas id=c><
 import * as THREE from 'three';import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
 const W=1680,H=560,r=new THREE.WebGLRenderer({canvas:c,preserveDrawingBuffer:true,antialias:true});r.setSize(W,H);r.setScissorTest(true);
 const s=new THREE.Scene();s.background=new THREE.Color(0x8a8f98);s.add(new THREE.HemisphereLight(0xffffff,0x555555,2.2));const d=new THREE.DirectionalLight(0xffffff,2);d.position.set(1,2,3);s.add(d);
-new GLTFLoader().load('/m.glb',g=>{s.add(g.scene);g.scene.updateMatrixWorld(true);const b=new THREE.Box3().setFromObject(g.scene);
+new GLTFLoader().load('/m.glb',g=>{s.add(g.scene);g.scene.traverse(o=>{if(o.material&&!o.material.map){o.material.metalness=0;o.material.roughness=0.75;}});g.scene.updateMatrixWorld(true);const b=new THREE.Box3().setFromObject(g.scene);
 ${y0?`const h=b.max.y-b.min.y,m=b.min.y;b.min.y=m+h*${y0};b.max.y=m+h*${y1};b.min.x*=0.3;b.max.x*=0.3;`:''}
 const ctr=b.getCenter(new THREE.Vector3()),sz=b.getSize(new THREE.Vector3());const R=${y0?'sz.y*0.6':'Math.max(sz.x,sz.y,sz.z)*0.62'};
 const cam=new THREE.OrthographicCamera(-R,R,R,-R,0.01,100);
